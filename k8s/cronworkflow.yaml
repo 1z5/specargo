@@ -5,7 +5,7 @@ metadata:
   namespace: data-platform
 spec:
   schedule: 0 2 * * *
-  timeZone: Asia/Shanghai
+  timezone: Asia/Shanghai
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 3600
   successfulJobsHistoryLimit: 7
