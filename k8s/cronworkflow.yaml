@@ -4,159 +4,230 @@ metadata:
   name: tts-daily
   namespace: data-platform
 spec:
-  # 每天 02:00 跑新增书籍（显式时区，别依赖控制器本地时区）
-  schedule: "0 2 * * *"
-  timeZone: "Asia/Shanghai"
-  # 上一批没跑完就不开第二批——对应原实现 _job_lock 的意图
+  schedule: 0 2 * * *
+  timeZone: Asia/Shanghai
   concurrencyPolicy: Forbid
-  # 错过窗口 1 小时内才补跑，避免"凌晨补跑 20 个批次"雪崩
   startingDeadlineSeconds: 3600
   successfulJobsHistoryLimit: 7
   failedJobsHistoryLimit: 7
-  # 排障时先 suspend，别让批次继续制造脏数据
   suspend: false
   workflowSpec:
     serviceAccountName: argo-workflow
     entrypoint: main
     activeDeadlineSeconds: 14400
-    podGC: {strategy: OnWorkflowSuccess}
-    ttlStrategy: {secondsAfterCompletion: 86400}
-    artifactGC: {strategy: OnWorkflowCompletion}
+    podGC:
+      strategy: OnWorkflowSuccess
+    ttlStrategy:
+      secondsAfterCompletion: 86400
+    artifactGC:
+      strategy: OnWorkflowCompletion
     arguments:
       parameters:
-      - {name: book-slugs, value: "book_a,book_b,book_c"}
-      - {name: voice, value: "cedar"}
-      - {name: run-id, value: "{{workflow.name}}"}
+      - name: book-slugs
+        value: book_a,book_b,book_c
+      - name: voice
+        value: cedar
+      - name: run-id
+        value: '{{workflow.name}}'
     volumes:
     - name: state
-      persistentVolumeClaim: {claimName: tts-state-pvc}
+      persistentVolumeClaim:
+        claimName: tts-state-pvc
     - name: output
-      persistentVolumeClaim: {claimName: tts-output-pvc}
+      persistentVolumeClaim:
+        claimName: tts-output-pvc
     - name: books
-      persistentVolumeClaim: {claimName: tts-books-pvc}
+      persistentVolumeClaim:
+        claimName: tts-books-pvc
     templates:
     - name: main
       dag:
         tasks:
         - name: generate
           template: gen-book
-          withParam: "{{workflow.parameters.book-slugs}}"
+          withParam: '{{workflow.parameters.book-slugs}}'
           arguments:
             parameters:
-            - {name: slug, value: "{{item}}"}
-            - {name: voice, value: "{{workflow.parameters.voice}}"}
-            - {name: run-id, value: "{{workflow.parameters.run-id}}"}
+            - name: slug
+              value: '{{item}}'
+            - name: voice
+              value: '{{workflow.parameters.voice}}'
+            - name: run-id
+              value: '{{workflow.parameters.run-id}}'
         - name: verify
           template: verify-book
-          dependencies: [generate]
+          dependencies:
+          - generate
           arguments:
             parameters:
-            - {name: slug, value: "{{item}}"}
-            - {name: voice, value: "{{workflow.parameters.voice}}"}
-            - {name: run-id, value: "{{workflow.parameters.run-id}}"}
+            - name: slug
+              value: '{{item}}'
+            - name: voice
+              value: '{{workflow.parameters.voice}}'
+            - name: run-id
+              value: '{{workflow.parameters.run-id}}'
         - name: fix
           template: fix-book
-          dependencies: [verify]
-          when: "{{tasks.verify.outputs.parameters.status}} == fail"
+          dependencies:
+          - verify
+          when: '{{tasks.verify.outputs.parameters.status}} == fail'
           arguments:
             parameters:
-            - {name: slug, value: "{{item}}"}
-            - {name: voice, value: "{{workflow.parameters.voice}}"}
-            - {name: run-id, value: "{{workflow.parameters.run-id}}"}
+            - name: slug
+              value: '{{item}}'
+            - name: voice
+              value: '{{workflow.parameters.voice}}'
+            - name: run-id
+              value: '{{workflow.parameters.run-id}}'
     - name: gen-book
-      timeout: "30m"
+      timeout: 30m
       retryStrategy:
-        limit: "3"
+        limit: '3'
         retryPolicy: OnTransientError
-        backoff: {duration: "1m", factor: 2, maxDuration: "10m"}
+        backoff:
+          duration: 1m
+          factor: 2
+          maxDuration: 10m
       synchronization:
         semaphores:
-        - configMapKeyRef: {name: tts-book-lock, key: "{{inputs.parameters.slug}}"}
+        - configMapKeyRef:
+            name: tts-book-lock
+            key: '{{inputs.parameters.slug}}'
       inputs:
         parameters:
-        - {name: slug}
-        - {name: voice}
-        - {name: run-id}
+        - name: slug
+        - name: voice
+        - name: run-id
       container:
         image: registry.example.com/data/tts:v1
-        command: [python, pipeline.py]
-        args: ["--book={{inputs.parameters.slug}}.json", "--voice={{inputs.parameters.voice}}"]
-        env:
-        - {name: TTS_RUN_ID, value: "{{inputs.parameters.run-id}}"}
-        - {name: TTS_STATE_DB, value: "/state/tts_state.db"}
-        - {name: TTS_OUTPUT_DIR, value: "/output"}
-        - {name: TTS_BOOKS_DIR, value: "/books"}
-        - {name: TTS_MAX_RETRIES, value: "1"}
-        - name: OPENAI_API_KEY
-          valueFrom: {secretKeyRef: {name: tts-secrets, key: openai-api-key}}
-        volumeMounts:
-        - {name: state, mountPath: /state}
-        - {name: output, mountPath: /output}
-        - {name: books, mountPath: /books}
-        resources:
-          requests: {cpu: 200m, memory: 512Mi}
-          limits: {cpu: "1", memory: 1Gi}
-    - name: verify-book
-      timeout: "20m"
-      retryStrategy: {limit: "0"}
-      inputs:
-        parameters:
-        - {name: slug}
-        - {name: voice}
-        - {name: run-id}
-      container:
-        image: registry.example.com/data/tts:v1
-        command: [python, verify_audio.py]
+        command:
+        - python
+        - pipeline.py
         args:
-        - "/output/{{inputs.parameters.slug}}"
-        - "--run-id={{inputs.parameters.run-id}}"
-        - "--state-db=/state/tts_state.db"
+        - --book={{inputs.parameters.slug}}.json
+        - --voice={{inputs.parameters.voice}}
         env:
-        - {name: TTS_RUN_ID, value: "{{inputs.parameters.run-id}}"}
-        - {name: TTS_OUTPUT_DIR, value: "/output"}
+        - name: TTS_RUN_ID
+          value: '{{inputs.parameters.run-id}}'
+        - name: TTS_STATE_DB
+          value: /state/tts_state.db
+        - name: TTS_OUTPUT_DIR
+          value: /output
+        - name: TTS_BOOKS_DIR
+          value: /books
+        - name: TTS_MAX_RETRIES
+          value: '1'
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: tts-secrets
+              key: openai-api-key
         volumeMounts:
-        - {name: state, mountPath: /state}
-        - {name: output, mountPath: /output}
+        - name: state
+          mountPath: /state
+        - name: output
+          mountPath: /output
+        - name: books
+          mountPath: /books
         resources:
-          requests: {cpu: "1", memory: 2Gi}
-          limits: {cpu: "2", memory: 4Gi}
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: '1'
+            memory: 1Gi
+    - name: verify-book
+      timeout: 20m
+      retryStrategy:
+        limit: '0'
+      inputs:
+        parameters:
+        - name: slug
+        - name: voice
+        - name: run-id
+      container:
+        image: registry.example.com/data/tts:v1
+        command:
+        - python
+        - verify_audio.py
+        args:
+        - /output/{{inputs.parameters.slug}}
+        - --run-id={{inputs.parameters.run-id}}
+        - --state-db=/state/tts_state.db
+        env:
+        - name: TTS_RUN_ID
+          value: '{{inputs.parameters.run-id}}'
+        - name: TTS_OUTPUT_DIR
+          value: /output
+        volumeMounts:
+        - name: state
+          mountPath: /state
+        - name: output
+          mountPath: /output
+        resources:
+          requests:
+            cpu: '1'
+            memory: 2Gi
+          limits:
+            cpu: '2'
+            memory: 4Gi
       outputs:
         parameters:
         - name: status
-          valueFrom: {path: /argo/outputs/parameters/status}
+          valueFrom:
+            path: /argo/outputs/parameters/status
     - name: fix-book
-      timeout: "30m"
-      retryStrategy: {limit: "2", retryPolicy: OnTransientError}
+      timeout: 30m
+      retryStrategy:
+        limit: '2'
+        retryPolicy: OnTransientError
       inputs:
         parameters:
-        - {name: slug}
-        - {name: voice}
-        - {name: run-id}
+        - name: slug
+        - name: voice
+        - name: run-id
       container:
         image: registry.example.com/data/tts:v1
-        command: [python, verify_audio.py]
+        command:
+        - python
+        - verify_audio.py
         args:
-        - "/output/{{inputs.parameters.slug}}"
-        - "--fix"
-        - "--run-id={{inputs.parameters.run-id}}"
-        - "--state-db=/state/tts_state.db"
+        - /output/{{inputs.parameters.slug}}
+        - --fix
+        - --run-id={{inputs.parameters.run-id}}
+        - --state-db=/state/tts_state.db
         env:
-        - {name: TTS_RUN_ID, value: "{{inputs.parameters.run-id}}"}
+        - name: TTS_RUN_ID
+          value: '{{inputs.parameters.run-id}}'
         - name: OPENAI_API_KEY
-          valueFrom: {secretKeyRef: {name: tts-secrets, key: openai-api-key}}
+          valueFrom:
+            secretKeyRef:
+              name: tts-secrets
+              key: openai-api-key
         volumeMounts:
-        - {name: state, mountPath: /state}
-        - {name: output, mountPath: /output}
+        - name: state
+          mountPath: /state
+        - name: output
+          mountPath: /output
         resources:
-          requests: {cpu: "1", memory: 2Gi}
-          limits: {cpu: "2", memory: 4Gi}
+          requests:
+            cpu: '1'
+            memory: 2Gi
+          limits:
+            cpu: '2'
+            memory: 4Gi
     - name: on-exit
-      onExit: "true"
       container:
         image: registry.example.com/data/tts:v1
-        command: [python, notify.py]
-        args: ["--run-id={{workflow.parameters.run-id}}"]
+        command:
+        - python
+        - notify.py
+        args:
+        - --run-id={{workflow.parameters.run-id}}
         env:
-        - {name: TTS_STATE_DB, value: "/state/tts_state.db"}
+        - name: TTS_STATE_DB
+          value: /state/tts_state.db
         volumeMounts:
-        - {name: state, mountPath: /state}
+        - name: state
+          mountPath: /state
+    onExit: on-exit
