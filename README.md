@@ -2,9 +2,11 @@
 
 ![k8s smoke](https://github.com/1z5/tts-pipeline-argo/actions/workflows/k8s-smoke.yml/badge.svg)
 
-**一条完整的数据管线案例：批量生成 → 独立回检 → 失败修复 → 对账收口，用 Argo Workflows 编排。
-编排已框架化（声明式 runner + 插件化检查），并补齐常驻服务、对象存储与 Prometheus 指标——
-覆盖「数据管线工程师」JD 的六条职责与七条要求。**
+**一条完整的数据管线案例：批量生成 → 独立回检 → 失败修复 → 对账收口，用 Argo Workflows 编排。**
+
+编排本身是框架化的（声明式 runner + 插件化质量检查），并包含常驻处理服务、对象存储抽象
+与 Prometheus 指标——覆盖任务调度、断点续跑、质量校验、状态登记到可观测告警的完整链路。
+批处理侧与常驻服务侧共享同一套可靠性语义。
 
 设计来自我在内容生产团队做批量 TTS 管线的真实经验，重构为可复现的开源参考实现：
 把"跑完"变成"跑对"——任务编排、断点续跑、幂等、质量校验、对账、告警六个环节都有代码。
@@ -29,22 +31,20 @@
 | 结果登记 | item 级状态表（run_id 贯穿全程，可追溯） |
 | 告警 | onExit 统一收口，webhook 可插拔 |
 
-## JD 覆盖矩阵（数据管线工程师）
+## 能力矩阵
 
-| JD 要求 | 本项目对应实现 |
+| 能力域 | 实现 |
 |---|---|
-| 职责 1 接手现有代码/流程/接口 | `docs/ARCHITECTURE.md` 分层与数据流；生成层/校验层只通过文件契约耦合 |
-| 职责 2 批量任务保障：进度/失败/超时/积压/遗漏、重试、断点续跑、幂等、重处理 | `runner.py`（依赖语义/重试策略/框架级断点续跑）+ `resume.py`（输入指纹）+ `state.py`（item 状态）+ `service.py` 的 `POST /tasks/{id}/retry` |
-| 职责 3 常驻服务维护、接口适配、模块接入、同步/异步、部署与版本升级 | `service.py`：`/healthz` `/readyz` `/process`(同步) `/tasks`(异步) `/version`，Processor 插件式接入，SIGTERM 四步优雅停机 |
-| 职责 4 数据质量与交付校验 | `checks.py` 插件注册表 + `tts_verify/` 三态判定 + `summary.py` expected vs actual 对账 |
-| 职责 5 效率与资源优化 | `runner.py` 并发与重试参数化、`artifacts.py` 存储抽象（本地/S3）、YAML 内 requests/limits 与节点池隔离 |
-| 职责 6 监控与运行规范 | `metrics.py`（Prometheus text 格式 + 进度/积压/失败率/对账缺失）、`notify.py` 收口告警、`docs/` 运行文档 |
-| 要求 3 Python/Linux/SQL + 异步 + HTTP/gRPC + MQ + 并发/限流/幂等/重试 | `runner.py`/`service.py`/`tts_client.py`；SQL 用 SQLite（同 schema 可迁 MySQL/PG） |
-| 要求 4 工作流调度 + **关系型数据库及对象存储** + 任务记录/数据关联/一致性 | `spec.py`+`runner.py`（调度）、`state.py`（任务记录）、`artifacts.py`（对象存储）、`reconcile_generic()`（一致性） |
-| 要求 5 Docker/K8s 部署、探针、资源配置、滚动升级、优雅停机 | `Dockerfile` + `k8s/*.yaml` + `service.py` 三种探针语义与停机时序 |
-| 加分 1 Argo / 多模态 / FFmpeg | `k8s/workflow.yaml`、`cronworkflow.yaml`；TTS 管线即音频多模态（ASR 回检） |
-| 加分 2 模型推理接入 | `tts_client.py`（TTS 批量调用）、`docs/VERIFICATION.md`（模型静默截断） |
-| 加分 3 自动化质检/追溯/版本/大批量重处理/成本 | `checks.py`、run_id 全程追溯、`--force` 大批量重处理、retry/backoff 控成本 |
+| **任务编排** | `spec.py` + `runner.py`：声明式 stage / dependencies / retry / timeout，分区支持 list、range、discover（动态发现）三种来源 |
+| **可靠性与恢复** | `runner.py` 框架级断点续跑（已过检的 stage×partition 直接跳过）、`resume.py` 输入 sha256 指纹、`retryStrategy` 分层（瞬时错误才重试）、`dependencies` 阻断语义 |
+| **常驻处理服务** | `service.py`：`/healthz` `/readyz` 两种探针语义、`/process` 同步与 `/tasks` 异步、`POST /tasks/{id}/retry` 失败重处理、Processor 插件式接入、SIGTERM 四步优雅停机 |
+| **数据质量** | `checks.py` 插件注册表（4 个通用检查）+ `tts_verify/` 句子级三态判定 + `summary.py` expected vs actual 对账（漏生成/未过检/重复文件/内容重复） |
+| **状态与追溯** | `state.py` item 级状态表（dataset/partition/variant/stage 四元组主键）、run_id 全程贯穿日志与产物 |
+| **可观测性** | `metrics.py` Prometheus text 格式指标（执行数/耗时分布/进度/积压/对账缺失/inflight）、`notify.py` onExit 收口告警 |
+| **存储抽象** | `artifacts.py` 对象存储契约 + 本地目录 / S3 兼容双实现，key 目录穿越防护，digest 用于变更检测 |
+| **容器与编排** | `Dockerfile` + `k8s/workflow.yaml` / `cronworkflow.yaml`；CI 内在 kind + Argo Workflows v3.7.18 上实测跑通（12/12 task + onExit） |
+| **多模态处理** | TTS/ASR 链路（音频批量生成 + 回检），`docs/VERIFICATION.md` 记录了模型静默截断这类无告警故障的定位方法 |
+| **成本与效率** | 并发与重试参数化、输入指纹避免重复计算、`--force` 受控大批量重处理、YAML 内 requests/limits 与节点池隔离 |
 
 ## 快速开始
 
