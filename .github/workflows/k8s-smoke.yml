@@ -1,0 +1,112 @@
+name: k8s-smoke
+
+# 在真实 K8s 集群（kind）里冒烟测试 Argo Workflows 编排：
+#   起集群 -> 装 Argo -> 构建镜像 -> submit DAG -> 断言跑通 -> 收集证据
+# 这一步是为了把"未在真实集群跑过"变成"已在 CI 集群跑通"。
+on:
+  push:
+    paths: ["k8s/**", "app/**", "Dockerfile.ci", ".github/workflows/k8s-smoke.yml"]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- 1. 起 kind 集群（K8s in Docker，单节点）----
+      - name: 启动 kind 集群
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: tts-argo
+          node_image: kindest/node:v1.29.0
+          wait: 120s
+
+      - name: 确认集群可用
+        run: |
+          kubectl cluster-info
+          kubectl get nodes -o wide
+          kubectl version --short 2>/dev/null || true
+
+      # ---- 2. 安装 Argo Workflows（生产主流 v3 线最后一个 minor）----
+      - name: 安装 Argo Workflows v3.7.18
+        run: |
+          set -e
+          kubectl create namespace argo
+          kubectl apply -n argo -f \
+            https://github.com/argoproj/argo-workflows/releases/download/v3.7.18/install.yaml
+          # quick-start 之外的显式 RBAC：让 default SA 能在 argo namespace 里跑
+          kubectl create rolebinding argo-default-admin -n argo \
+            --clusterrole=admin --serviceaccount=argo:default || true
+          kubectl wait --for=condition=available --timeout=300s \
+            deployment/argo-server deployment/workflow-controller -n argo
+          kubectl get pods -n argo
+
+      # ---- 3. 构建轻量镜像并加载进 kind ----
+      - name: 构建并加载镜像
+        run: |
+          set -e
+          docker build -f Dockerfile.ci -t tts-argo:ci .
+          kind load docker-image tts-argo:ci --name tts-argo
+          echo "--- 镜像已加载 ---"
+
+      # ---- 4. 提交工作流并等待结果（失败则 CI 变红）----
+      - name: 提交 ETL DAG 到 Argo
+        run: |
+          set -e
+          ARGO_VERSION=v3.7.18
+          curl -sSL -o /tmp/argo \
+            "https://github.com/argoproj/argo-workflows/releases/download/${ARGO_VERSION}/argo-linux-amd64" \
+            || curl -sSL -o /tmp/argo.gz \
+            "https://github.com/argoproj/argo-workflows/releases/download/${ARGO_VERSION}/argo-linux-amd64.gz"
+          [ -f /tmp/argo.gz ] && gunzip -f /tmp/argo.gz && mv /tmp/argo /tmp/argo 2>/dev/null || true
+          chmod +x /tmp/argo
+          /tmp/argo version
+          /tmp/argo lint -n argo k8s/workflow-etl-smoke.yaml
+          /tmp/argo submit -n argo k8s/workflow-etl-smoke.yaml --watch
+
+      # ---- 5. 收集证据（无论成败）----
+      - name: 收集运行证据
+        if: always()
+        run: |
+          set +e
+          mkdir -p /tmp/evidence
+          /tmp/argo list -n argo | tee /tmp/evidence/argo-list.txt
+          /tmp/argo get -n argo @latest -o yaml > /tmp/evidence/workflow.yaml 2>&1
+          kubectl get pods -n argo -o wide | tee /tmp/evidence/pods.txt
+          kubectl get events -n argo --sort-by=.lastTimestamp | tail -40 \
+            | tee /tmp/evidence/events.txt
+          echo "--- 产物文件 ---"
+          find /tmp/ci/output -type f 2>/dev/null | head -20 | tee /tmp/evidence/artifacts.txt
+          echo "--- validate 阶段输出（质量闸门）---"
+          grep -h "\[validate\]" /tmp/evidence/*.txt 2>/dev/null || true
+
+      - name: 上传证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k8s-smoke-evidence
+          path: /tmp/evidence/
+          retention-days: 30
+
+      # ---- 6. 硬断言：工作流必须成功，且每个分区都过检 ----
+      - name: 断言结果
+        run: |
+          set -e
+          PHASE=$(/tmp/argo get -n argo @latest -o json 2>/dev/null \
+                  | python3 -c "import sys,json;print(json.load(sys.stdin)['status']['phase'])")
+          echo "工作流最终状态: $PHASE"
+          [ "$PHASE" = "Succeeded" ] || { echo "❌ 工作流未成功"; exit 1; }
+          # 12 个 task 节点（4 阶段 × 3 分区）必须全部 Succeeded
+          OK=$(/tmp/argo get -n argo @latest -o json 2>/dev/null | python3 -c "
+          import sys, json
+          wf = json.load(sys.stdin)
+          nodes = [n for n in wf['status']['nodes'].values()
+                   if n['type'] == 'Pod' and n.get('templateName') != 'on-exit']
+          succeeded = sum(1 for n in nodes if n['phase'] == 'Succeeded')
+          print(f'{succeeded}/{len(nodes)}')
+          ")
+          echo "Pod 节点成功数: $OK"
+          [ "$OK" = "12/12" ] || { echo "❌ 并非所有 task 都成功"; exit 1; }
+          echo "✅ 集群冒烟通过：Argo DAG 在 kind 上完整跑通"

@@ -1,0 +1,221 @@
+# ETL 管线的 Argo Workflow 版本——用于 CI 里的真实集群冒烟测试（kind + Argo）。
+#
+# 与 pipelines/etl-demo.yaml 的关系：同一套 stage/依赖/重试语义，这里用
+# Argo 原生 CRD 表达，用于验证"同一份设计在真实集群上能跑起来"。
+#
+# 特点（对应 JD）：
+#   - withParam 按分区扇出，一个 Pod 一个分区（失败影响面最小）
+#   - dependencies 依赖语义：上游失败则下游不调度
+#   - retryStrategy 分层：extract 可重试（网络/上游抖动），load 不重试
+#   - 质量闸门：validate 阶段在集群里跑 checks.py 的 row_count 插件
+#   - onExit 收口：无论成败都写完成标记
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: etl-smoke
+  namespace: argo
+spec:
+  entrypoint: main
+  activeDeadlineSeconds: 600          # 整批 10 分钟硬超时
+  podGC:
+    strategy: OnWorkflowSuccess        # 成功后清 Pod；失败保留现场
+  ttlStrategy:
+    secondsAfterCompletion: 3600
+  arguments:
+    parameters:
+    - name: run-id
+      value: "{{workflow.name}}"       # run_id 贯穿日志与产物路径
+
+  volumes:
+  # kind 单节点可用 hostPath 共享产物；多节点集群换成 ReadWriteMany PVC
+  - name: output
+    hostPath:
+      path: /tmp/ci/output
+      type: DirectoryOrCreate
+
+  templates:
+  # =====================================================================
+  # 主 DAG：extract → transform → load → validate（每阶段按分区扇出）
+  # =====================================================================
+  - name: main
+    dag:
+      tasks:
+      - name: extract
+        template: extract
+        withParam: '["1", "2", "3"]'
+        arguments:
+          parameters:
+          - {name: partition, value: "{{item}}"}
+          - {name: run-id, value: "{{workflow.parameters.run-id}}"}
+
+      - name: transform
+        template: transform
+        dependencies: [extract]
+        withParam: '["1", "2", "3"]'
+        arguments:
+          parameters:
+          - {name: partition, value: "{{item}}"}
+          - {name: run-id, value: "{{workflow.parameters.run-id}}"}
+
+      - name: load
+        template: load
+        dependencies: [transform]
+        withParam: '["1", "2", "3"]'
+        arguments:
+          parameters:
+          - {name: partition, value: "{{item}}"}
+          - {name: run-id, value: "{{workflow.parameters.run-id}}"}
+
+      # 质量闸门：在集群里跑真实的检查插件，不过检则 task 失败
+      - name: validate
+        template: validate
+        dependencies: [load]
+        withParam: '["1", "2", "3"]'
+        arguments:
+          parameters:
+          - {name: partition, value: "{{item}}"}
+
+  # =====================================================================
+  # extract：瞬时错误才重试（上游数据源抖动）
+  # =====================================================================
+  - name: extract
+    inputs:
+      parameters:
+      - {name: partition}
+      - {name: run-id}
+    timeout: "5m"
+    retryStrategy:
+      limit: "2"
+      retryPolicy: OnTransientError
+      backoff:
+        duration: "10s"
+        factor: 2
+        maxDuration: "1m"
+    container:
+      image: tts-argo:ci
+      imagePullPolicy: Never            # kind load 进去的本地镜像
+      command: [python3]
+      args:
+        - /app/etl_steps.py
+        - extract
+        - "--partition={{inputs.parameters.partition}}"
+        - "--out=/output/extract/{{inputs.parameters.partition}}.jsonl"
+      env:
+      - {name: TTS_RUN_ID, value: "{{inputs.parameters.run-id}}"}
+      volumeMounts:
+      - {name: output, mountPath: /output}
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+
+  # =====================================================================
+  # transform：数据问题不重试（limit 0），不过检即阻断
+  # =====================================================================
+  - name: transform
+    inputs:
+      parameters:
+      - {name: partition}
+      - {name: run-id}
+    timeout: "5m"
+    retryStrategy:
+      limit: "0"
+    container:
+      image: tts-argo:ci
+      imagePullPolicy: Never
+      command: [python3]
+      args:
+        - /app/etl_steps.py
+        - transform
+        - "--in=/output/extract/{{inputs.parameters.partition}}.jsonl"
+        - "--out=/output/transform/{{inputs.parameters.partition}}.jsonl"
+      env:
+      - {name: TTS_RUN_ID, value: "{{inputs.parameters.run-id}}"}
+      volumeMounts:
+      - {name: output, mountPath: /output}
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+
+  # =====================================================================
+  # load：写完成标记
+  # =====================================================================
+  - name: load
+    inputs:
+      parameters:
+      - {name: partition}
+      - {name: run-id}
+    timeout: "5m"
+    retryStrategy:
+      limit: "2"
+      retryPolicy: OnTransientError
+    container:
+      image: tts-argo:ci
+      imagePullPolicy: Never
+      command: [python3]
+      args:
+        - /app/etl_steps.py
+        - load
+        - "--in=/output/transform/{{inputs.parameters.partition}}.jsonl"
+        - "--out=/output/load/{{inputs.parameters.partition}}.done"
+      env:
+      - {name: TTS_RUN_ID, value: "{{inputs.parameters.run-id}}"}
+      volumeMounts:
+      - {name: output, mountPath: /output}
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+
+  # =====================================================================
+  # validate：集群里跑质量检查插件（JD 职责 4 的自动化校验）
+  # =====================================================================
+  - name: validate
+    inputs:
+      parameters:
+      - {name: partition}
+    timeout: "2m"
+    retryStrategy:
+      limit: "0"                        # 检查失败是数据问题，重试无意义
+    container:
+      image: tts-argo:ci
+      imagePullPolicy: Never
+      command: [python3, -c]
+      args:
+        - |
+          import sys
+          sys.path.insert(0, "/app")
+          from pathlib import Path
+          from checks import run_check
+
+          artifact = Path("/output/transform/{{inputs.parameters.partition}}.jsonl")
+          result = run_check("row_count", artifact, {"expect": 50}, {})
+          print(f"[validate] partition={{inputs.parameters.partition}} "
+                f"passed={result.passed} metric={result.metric} {result.detail}")
+          sys.exit(0 if result.passed else 1)
+      volumeMounts:
+      - {name: output, mountPath: /output}
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+
+  # =====================================================================
+  # onExit：成败都收口（对应 JD 职责 6 的告警/排障入口）
+  # =====================================================================
+  - name: on-exit
+    onExit: "true"
+    container:
+      image: tts-argo:ci
+      imagePullPolicy: Never
+      command: [python3, -c]
+      args:
+        - |
+          import os, time
+          from pathlib import Path
+          out = Path("/output")
+          out.mkdir(parents=True, exist_ok=True)
+          marker = out / f"run-{os.environ.get('TTS_RUN_ID','unknown')}.done"
+          marker.write_text(f"finished at {time.time()}\n", encoding="utf-8")
+          print(f"[onExit] 收口完成 -> {marker}")
+      env:
+      - {name: TTS_RUN_ID, value: "{{workflow.parameters.run-id}}"}
+      volumeMounts:
+      - {name: output, mountPath: /output}
