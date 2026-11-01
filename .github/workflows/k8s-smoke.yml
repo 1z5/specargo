@@ -97,6 +97,22 @@ jobs:
           # "You need to configure artifact storage"）
           kubectl rollout restart deployment/workflow-controller -n argo
           kubectl rollout status deployment/workflow-controller -n argo --timeout=180s
+
+          # moto 启动时是空的，需要显式建 bucket（MinIO 是在启动命令里 mkdir 的）
+          echo "--- 创建 artifact bucket ---"
+          kubectl exec -n argo deploy/object-store -- python3 -c "
+          import boto3
+          s3 = boto3.client('s3', endpoint_url='http://127.0.0.1:5000',
+                            aws_access_key_id='test-access-key',
+                            aws_secret_access_key='test-secret-key',
+                            region_name='us-east-1')
+          try:
+              s3.create_bucket(Bucket='argo-artifacts')
+              print('bucket argo-artifacts 已创建')
+          except Exception as e:
+              print('bucket 创建:', e)
+          print('buckets:', [b['Name'] for b in s3.list_buckets()['Buckets']])
+          "
           kubectl get pods -n argo -l app=object-store
           echo "--- artifact repository 配置 ---"
           kubectl get configmap artifact-repositories -n argo -o yaml | grep -A4 "s3:"
