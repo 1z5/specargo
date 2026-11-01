@@ -146,19 +146,9 @@ jobs:
           echo "--- 对象存储中的 artifact（路径契约产物）---"
           POD=$(kubectl get pods -n argo -l app=object-store \
                -o jsonpath='{.items[0].metadata.name}')
-          kubectl exec -n argo "$POD" -- python3 -c "
-          import boto3
-          s3 = boto3.client('s3', endpoint_url='http://127.0.0.1:5000',
-                            aws_access_key_id='test-access-key',
-                            aws_secret_access_key='test-secret-key')
-          for b in s3.list_buckets().get('Buckets', []):
-              r = s3.list_objects_v2(Bucket=b['Name'])
-              print(f"bucket {b['Name']}: {r.get('KeyCount', 0)} objects")
-              for o in r.get('Contents', []):
-                  print('  ', o['Key'])
-          " 2>&1 | tee /tmp/evidence/artifacts.txt
-          echo "--- validate 阶段输出（质量闸门）---"
-          grep -h "\[validate\]" /tmp/evidence/*.txt 2>/dev/null || true
+          kubectl cp ci/dump_objects.py argo/"$POD":/tmp/dump_objects.py
+          kubectl exec -n argo "$POD" -- python3 /tmp/dump_objects.py \
+            | tee /tmp/evidence/artifacts.txt
 
       - name: 上传证据
         if: always()
@@ -219,17 +209,10 @@ jobs:
           echo "--- 对象存储 artifact 验证 ---"
           POD=$(kubectl get pods -n argo -l app=object-store -o jsonpath='{.items[0].metadata.name}')
           # moto 的 S3 数据在进程内存里，用 S3 API 列举 bucket 内的对象数
-          KEYS=$(kubectl exec -n argo "$POD" -- python3 -c "
-          import boto3
-          s3 = boto3.client('s3', endpoint_url='http://127.0.0.1:5000',
-                            aws_access_key_id='test-access-key',
-                            aws_secret_access_key='test-secret-key')
-          total = 0
-          for b in s3.list_buckets().get('Buckets', []):
-              r = s3.list_objects_v2(Bucket=b['Name'])
-              total += r.get('KeyCount', 0)
-          print(total)
-          " 2>/dev/null || echo 0)
+          # 复用 ci/dump_objects.py，输出 "total=N" 便于断言
+          KEYS=$(kubectl exec -n argo "$POD" -- python3 /tmp/dump_objects.py 2>/dev/null \
+                 | grep -oE "[0-9]+ objects" | grep -oE "^[0-9]+" \
+                 | awk '{s+=$1} END {print s+0}')
           echo "对象存储中的 artifact 对象数: $KEYS"
           [ "$KEYS" -gt 0 ] || { echo "❌ artifact 未写入对象存储"; exit 1; }
 
