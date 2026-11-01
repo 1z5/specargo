@@ -28,7 +28,7 @@ spec:
     spec:
       containers:
       - name: minio
-        image: minio/minio:latest
+        image: quay.io/minio/minio:latest   # Docker Hub 的 minio/minio 已不可拉取，官方迁至 Quay
         command: ["/bin/sh", "-c"]
         # 预建 bucket，避免 Argo 上传时 bucket 不存在
         args:

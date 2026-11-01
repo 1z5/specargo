@@ -62,6 +62,14 @@ jobs:
 
       # ---- 2. 部署 MinIO（S3 兼容对象存储）并配置 Argo artifact repository ----
       # 多节点集群下 hostPath / emptyDir 是节点本地的，跨 Pod 传数据必须走对象存储
+      # 预拉取 MinIO 镜像并加载进所有 kind 节点（确定性强，避免逐节点拉取失败）
+      - name: 预拉取 MinIO 镜像
+        run: |
+          set -e
+          docker pull quay.io/minio/minio:latest
+          kind load docker-image quay.io/minio/minio:latest --name tts-argo
+          echo "--- MinIO 镜像已加载到所有节点 ---"
+
       - name: 部署 MinIO 与 artifact repository
         run: |
           set -e
