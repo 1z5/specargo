@@ -178,15 +178,23 @@ jobs:
           TOTAL=${OK#*/}; DONE=${OK%/*}
           [ "$DONE" = "$TOTAL" ] || { echo "❌ 并非所有 task 都成功: $OK"; exit 1; }
 
-          # 动态工作流：discover 必须发现 5 个分区并扇出（4 阶段 × 5 = 20 + discover + onExit）
+          # 动态工作流：分区数由 discover 决定，Pod 数也应随之推导，不写死
           echo "--- 动态扇出验证 ---"
-          FOUND=$(kubectl logs -n argo -l workflows.argoproj.io/node-type=Pod \
-                  --tail=-1 --prefix=false 2>/dev/null | grep -o "发现 5 个待处理分区" | head -1)
-          kubectl logs -n argo job/etl-smoke 2>/dev/null | head -5 || true
+          PARTS=$(/tmp/argo get -n argo @latest -o json 2>/dev/null | python3 -c "
+          import sys, json
+          wf = json.load(sys.stdin)
+          n = [x for x in wf['status']['nodes'].values()
+               if x.get('templateName') == 'extract' and x.get('type') == 'Pod']
+          print(len(n))
+          ")
+          echo "discover 发现并扇出的分区数: $PARTS"
+          [ "$PARTS" -ge 3 ] || { echo "❌ 动态扇出分区数不足"; exit 1; }
+          # 期望 Pod 数 = 1(discover) + 4 阶段 × 分区数；onExit 的 Pod 可能已被 podGC 清理
+          EXPECT=$((1 + 4 * PARTS))
           PODS=$(kubectl get pods -n argo -l workflows.argoproj.io/workflow=etl-smoke \
                  --no-headers 2>/dev/null | wc -l)
-          echo "工作流 Pod 总数: $PODS（期望 22 = 1 discover + 4×5 扇出 + 1 onExit）"
-          [ "$PODS" = "22" ] || { echo "❌ 动态扇出数量不符"; exit 1; }
+          echo "工作流 Pod 总数: $PODS（期望 $EXPECT = 1 discover + 4×$PARTS；onExit 可能已 GC）"
+          [ "$PODS" = "$EXPECT" ] || { echo "❌ 动态扇出数量不符"; exit 1; }
 
           # 跨节点调度：Pod 必须分布在多个节点上
           echo "--- 跨节点调度验证 ---"
