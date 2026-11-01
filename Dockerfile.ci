@@ -1,0 +1,12 @@
+# CI 专用轻量镜像：只含 app/ 代码（纯标准库，无需 openai/faster-whisper）
+# 目的：让 kind 冒烟测试的构建时间从几分钟降到几秒
+FROM python:3.12-slim
+
+WORKDIR /app
+COPY app/ /app/
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TTS_OUTPUT_DIR=/output
+
+CMD ["python3", "-c", "print('tts-argo ci image ready')"]
