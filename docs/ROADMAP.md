@@ -2,44 +2,43 @@
 
 按价值/风险排序的后续工作。已完成项见 `README.md` 的「已验证」章节。
 
-## 进行中 / 下一步
+## 已完成
 
-### 1. `spec2argo` 编译器（最高价值）
+### ✅ spec2argo 编译器（同一份 spec，两个执行目标）
 
-**问题**：目前本地 runner 与集群 workflow 是两份定义——
-`pipelines/etl-demo.yaml`（3 分区）与 `k8s/workflow-etl-smoke.yaml`（5 分区），
-retry 配置、质量闸门写法都各自维护，**必然漂移**。
-
-**方案**：写一个把 `PipelineSpec` 编译成 Argo CRD 的编译器：
+`app/spec2argo.py` 把 PipelineSpec 编译成 Argo CRD：
 
 | PipelineSpec | Argo CRD |
 |---|---|
-| `stages` + `dependencies` | `dag.tasks` + `dependencies` |
-| `partitions` | `withItems` / `withParam`（含 discover 动态扇出） |
-| `RetryPolicy` | `retryStrategy` |
-| `Stage.timeout` | template `timeout` |
-| `checks` | 独立的 `validate` 阶段（跑 `checks.py` 插件） |
-| `artifacts` 声明 | 对象存储路径契约（`objstore.py`） |
+| stages + dependencies | dag.tasks + dependencies |
+| partitions: discover | discover 任务 + withParam 引用其 JSON 数组输出 |
+| RetryPolicy | retryStrategy（总是输出；limit=0 是显式设计意图） |
+| Stage.timeout | template timeout |
+| checks | 独立 gate-<stage> 任务（跑 checks.py 插件，limit=0） |
+| artifacts / consumes | 自动接线对象存储路径契约（上游 put、下游 get，key 一致） |
 
-**验收**：CI 编译 `pipelines/etl-demo.yaml` → `argo lint` 通过 → **用编译产物**跑集群冒烟，
-替换手写 YAML。这样才真正兑现"同一份 spec 本地/集群都执行"。
+验收已达成：CI 编译 pipelines/etl-demo.yaml -> argo lint 通过 -> 提交编译产物
+跑集群冒烟（31/31 Pod、5 分区、Succeeded）。本地 runner 与集群执行自此共享
+同一份 spec；k8s/workflow-etl-smoke.yaml 降级为对照参考。
 
-**规模**：约 200–300 行 + 测试。**风险**：中（新增一层，但可先只覆盖 ETL demo 子集）。
+已知边界：编译器目前覆盖 ETL demo 用到的特性子集（container 命令 + checks +
+artifacts）；script 型 template、synchronization、suspend 等尚未映射。
 
-### 2. runner 回传真实 attempt 次数
+## 进行中 / 下一步
 
-`runner.py` 里 `attempts = 0` 是硬编码的，`_execute()` 内部的重试计数没有回传，
-导致状态表 `attempt` 列只是"被 upsert 过几次"，不是真实重试次数。
-改为让 `_execute()` 返回 `(ok, out, attempts)`。
+### 1. runner 回传真实 attempt 次数（已完成）
 
-### 3. service 的 job 状态落 SQLite
+_execute() 现返回 (ok, out, attempts)，状态表 attempt 列是真实重试次数
+（有测试锁定：前两次失败第三次成功 -> attempts == 3）。
+
+### 2. service 的 job 状态落 SQLite
 
 当前 job 记录纯内存：服务重启后 `GET /tasks/{id}` 返回 404，但状态表里还有记录。
 应把 job 记录也落 `state.py` 的表（或新建 `service_job` 表），重启后可查、可重试。
 
 ## 扩展验证
 
-### 4. 规模测试：千级分区
+### 3. 规模测试：千级分区
 
 `partitions: {from: range, start: 1, end: 200}` 跑一轮，观测：
 - workflow-controller 的队列深度与 API server QPS
@@ -48,14 +47,14 @@ retry 配置、质量闸门写法都各自维护，**必然漂移**。
 
 产出数据写进 README，补上"千级 Pod 未实测"这一条。
 
-### 5. 失败注入测试
+### 4. 失败注入测试
 
 故意让某分区 `validate` 失败，验证：
 - task 失败 → 下游被依赖语义跳过 → 对账报 missing → 退出码非 0
 - `onExit` 仍收口
 - 告警通道收到通知
 
-### 6. WorkflowTemplate + 版本化
+### 5. WorkflowTemplate + 版本化
 
 `k8s/workflowtemplate.yaml` + `workflowTemplateRef`，演示 DAG 改版如何灰度与回滚
 （对应"工作流版本管理与发布"）。

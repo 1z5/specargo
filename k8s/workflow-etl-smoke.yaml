@@ -1,3 +1,7 @@
+# ⚠️ 已被编译产物取代（保留作对照参考）
+# CI 现在提交的是 pipelines/etl-demo.yaml 经 spec2argo 编译出的 workflow
+# （同一个编译器在 unit-tests 里也会被 lint）。本文件是早期手写版本，
+# 仅用于对照编译产物长什么样，不再被 CI 使用。
 # ETL 管线的 Argo Workflow 版本——CI 里的真实集群冒烟测试（kind 多节点 + Argo v3.7.18）。
 #
 # 与 pipelines/etl-demo.yaml 的关系：同一套 stage/依赖/重试语义，这里用 Argo 原生 CRD 表达，
