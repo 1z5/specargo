@@ -234,6 +234,48 @@ def test_service_rejects_new_tasks_while_draining():
     assert code == 503 and body["status"] == "draining"
 
 
+def test_retry_uses_original_payload():
+    """retry 必须用原始 payload 重跑，而不是空参数（静默错误结果回归）。"""
+    import importlib
+    service_mod = importlib.import_module("service")
+
+    class FlakyProcessor(service_mod.Processor):
+        """第一次按 payload 抛错，第二次成功——用来验证重试真的带上了原文。"""
+        name = "flaky"
+
+        def __init__(self):
+            self.calls = []
+
+        def process(self, item):
+            self.calls.append(dict(item))
+            if len(self.calls) == 1:
+                raise RuntimeError("boom")
+            return {"echo": item.get("payload")}
+
+    svc = service_mod.Service(processor=FlakyProcessor(), workers=2)
+    job_id = svc.submit({"payload": "important-data"})
+    # 等第一次失败
+    for _ in range(50):
+        if svc.get_job(job_id)["status"] in ("failed", "failed"):
+            break
+        time.sleep(0.05)
+    assert svc.get_job(job_id)["status"] in ("failed",), svc.get_job(job_id)
+
+    svc.retry(job_id)
+    for _ in range(50):
+        job = svc.get_job(job_id)
+        if job["status"] in ("succeeded", "verified"):
+            break
+        time.sleep(0.05)
+
+    job = svc.get_job(job_id)
+    assert job["status"] in ("succeeded", "verified"), job
+    # 关键断言：两次调用都带上了原始 payload，且结果正确
+    assert svc.processor.calls[0] == {"payload": "important-data"}, svc.processor.calls
+    assert svc.processor.calls[1] == {"payload": "important-data"}, svc.processor.calls
+    assert job["result"] == {"echo": "important-data"}, job
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -284,20 +284,43 @@ def reconcile_generic(conn, dataset: str, expected, final_stage: str | None = No
     TTS 管线来自书籍 JSON 推导，ETL 管线来自时间窗，两者走同一套对账。
     ``final_stage``：只按最后一个 stage 判定是否交付（多 stage 管线的正确语义：
     中间 stage 成功不代表整条管线成功）。
+
+    ⚠️ variant 必须参与对账：TTS 这类"同内容多音色"的管线，
+    若按 (dataset, stage) 聚合，A 音色缺的章节会被 B 音色的记录掩盖 → 假绿。
+    这里按 (dataset, variant) 分组分别对账，再合并结论。
     """
-    expected_keys = [p[1] for p in expected if p[0] == dataset]
-    if final_stage:
-        rows = {r["chapter_num"]: r for r in conn.execute(
-            "SELECT * FROM tts_item WHERE book_slug=? AND stage=?",
-            (dataset, final_stage)).fetchall()}
-    else:
-        rows = {r["chapter_num"]: r for r in items_for_generic(conn, dataset, "")}
-    missing = [k for k in expected_keys if k not in rows]
-    not_verified = [k for k in expected_keys if k in rows and rows[k]["status"] != VERIFIED]
+    groups: dict[str, dict] = {}
+    for ds, key, variant in expected:
+        if ds != dataset:
+            continue
+        g = groups.setdefault(variant, {"expected": [], "rows": {}})
+        g["expected"].append(key)
+
+    # 一次性取回该 dataset 的所有行，按 variant 分组（避免 N 次查询）
+    all_rows = conn.execute(
+        "SELECT * FROM tts_item WHERE book_slug=?", (dataset,)).fetchall()
+    by_variant: dict[str, dict] = {}
+    for r in all_rows:
+        if final_stage and r["stage"] != final_stage:
+            continue
+        by_variant.setdefault(r["voice"], {})[r["chapter_num"]] = r
+
+    missing: list[str] = []
+    not_verified: list[str] = []
+    expected_total = 0
+    for variant, g in groups.items():
+        rows = by_variant.get(variant, {})
+        expected_total += len(g["expected"])
+        for key in g["expected"]:
+            if key not in rows:
+                missing.append(f"{variant or '-'}:{key}" if variant else key)
+            elif rows[key]["status"] != VERIFIED:
+                not_verified.append(f"{variant or '-'}:{key}" if variant else key)
+
     return {
         "dataset": dataset,
-        "expected": len(expected_keys),
-        "verified": len(expected_keys) - len(missing) - len(not_verified),
+        "expected": expected_total,
+        "verified": expected_total - len(missing) - len(not_verified),
         "missing": missing,
         "not_verified": not_verified,
         "ok": not missing and not not_verified,

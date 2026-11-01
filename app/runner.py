@@ -68,6 +68,8 @@ class Runner:
         # 代码目录与工作目录分离：workdir 放产物，app_dir 放代码
         # （容器里两者通常都是 /app；本地演练时 workdir 常是临时目录）
         spec.params.setdefault("app_dir", str(Path(__file__).resolve().parent))
+        # run_id 由 Runner 注入：YAML 里只声明不赋值，避免两份定义漂移
+        spec.params.setdefault("run_id", self.run_id)
 
     # ------------------------------------------------------------------
     def _log(self, msg: str) -> None:

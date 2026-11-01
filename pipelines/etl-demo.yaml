@@ -5,7 +5,9 @@ description: 抽取 → 转换 → 校验 → 装载（纯通用，用于验证�
 
 params:
   python: python3        # 解释器可配置：容器里可能是 python
-  state_db: ""
+  state_db: ""            # 由 CLI 注入；空则只跑不登记
+  run_id: ""              # 由 Runner 注入，YAML 不赋值
+  app_dir: ""             # 由 Runner 注入（代码目录）
 
 partitions:
   from: range             # 时间窗分区：start..end（真实数仓的分区形态）

@@ -27,7 +27,42 @@ def test_render_supports_dotted_paths():
     ctx = {"partition": {"key": "book_a", "variant": "cedar"}, "params": {"n": 3}}
     assert render("out/{{partition.key}}_{{partition.variant}}.jsonl", ctx) == "out/book_a_cedar.jsonl"
     assert render("limit={{params.n}}", ctx) == "limit=3"
-    assert render("{{missing}}x", ctx) == "x"
+
+
+def test_render_strict_rejects_unknown_variable():
+    """未定义变量必须报错，不能静默替换成空串（残缺命令最难查）。"""
+    from spec import SpecError
+    ctx = {"params": {"n": 3}}
+    try:
+        render("--run-id {{params.run_id}}", ctx)
+        raise AssertionError("应抛出 SpecError")
+    except SpecError as exc:
+        assert "params.run_id" in str.exc if False else "params.run_id" in str(exc), exc
+    # 显式关闭严格模式时才退回空串（兼容旧调用）
+    assert render("{{missing}}x", ctx, strict=False) == "x"
+
+
+def test_load_spec_rejects_undeclared_param():
+    """YAML 用了未声明参数必须在加载期炸掉。"""
+    import tempfile
+    from spec import SpecError, load_spec
+
+    bad = """
+name: bad
+params: {python: python3}
+partitions: {from: list, items: [{dataset: d, key: k}]}
+stages:
+  - name: s1
+    command: "{{params.python}} x.py --run-id {{params.run_id}}"
+"""
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "bad.yaml"
+        f.write_text(bad, encoding="utf-8")
+        try:
+            load_spec(f)
+            raise AssertionError("应抛出 SpecError")
+        except SpecError as exc:
+            assert "run_id" in str(exc), exc
 
 
 def test_load_spec_etl_demo():
@@ -218,6 +253,43 @@ def test_runner_dependency_blocks_downstream():
             by_stage.setdefault(x.stage, set()).add(x.status)
         assert by_stage["extract"] == {"failed"}
         assert by_stage["load"] == {"skipped"}, "下游必须被阻断"
+
+
+def test_reconcile_groups_by_variant():
+    """多 variant 必须分组对账：A 音色缺章不能被 B 音色掩盖（假绿回归）。"""
+    with tempfile.TemporaryDirectory() as d:
+        conn = st.connect(Path(d) / "state.db")
+        expected = [("ds", "0", "male"), ("ds", "1", "male"),
+                    ("ds", "0", "female"), ("ds", "1", "female")]
+        # 只登记 female 的全部 + male 的 0（male 缺 1）
+        for k in ("0", "1"):
+            st.upsert_generic_item(conn, dataset="ds", partition=k, variant="female",
+                                   status=st.VERIFIED, stage="verify")
+        st.upsert_generic_item(conn, dataset="ds", partition="0", variant="male",
+                               status=st.VERIFIED, stage="verify")
+
+        r = st.reconcile_generic(conn, "ds", expected, final_stage="verify")
+        assert r["expected"] == 4, r
+        # male:1 缺失必须被报出来，且带 variant 前缀便于定位
+        assert r["missing"] == ["male:1"], r
+        assert r["ok"] is False
+
+        # 补齐 male:1 后应通过
+        st.upsert_generic_item(conn, dataset="ds", partition="1", variant="male",
+                               status=st.VERIFIED, stage="verify")
+        r2 = st.reconcile_generic(conn, "ds", expected, final_stage="verify")
+        assert r2["ok"] is True and r2["verified"] == 4, r2
+
+
+def test_reconcile_single_variant_unchanged():
+    """单 variant 行为不回退。"""
+    with tempfile.TemporaryDirectory() as d:
+        conn = st.connect(Path(d) / "state.db")
+        expected = [("ds", "0", ""), ("ds", "1", "")]
+        st.upsert_generic_item(conn, dataset="ds", partition="0", variant="",
+                               status=st.VERIFIED, stage="load")
+        r = st.reconcile_generic(conn, "ds", expected, final_stage="load")
+        assert r["missing"] == ["1"] and r["ok"] is False, r
 
 
 if __name__ == "__main__":

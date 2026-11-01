@@ -106,8 +106,16 @@ class PipelineSpec:
 _VAR = re.compile(r"\{\{\s*([a-zA-Z_][\w.]*)\s*\}\}")
 
 
-def render(template: str, context: dict) -> str:
-    """把 ``{{a.b}}`` 替换为 context 里的值（支持点号路径）。"""
+class SpecError(ValueError):
+    """管线定义或渲染错误（未知变量、缺参数等）。"""
+
+
+def render(template: str, context: dict, *, strict: bool = True) -> str:
+    """把 ``{{a.b}}`` 替换为 context 里的值（支持点号路径）。
+
+    strict=True 时，未定义变量抛 SpecError 而不是静默替换成空串——
+    静默空串会让 ``--run-id `` 这种残缺命令照常执行，是最难查的一类错。
+    """
     def lookup(path: str):
         cur = context
         for part in path.split("."):
@@ -117,11 +125,21 @@ def render(template: str, context: dict) -> str:
                 return None
         return cur
 
+    missing: list[str] = []
+
     def repl(m: re.Match) -> str:
         value = lookup(m.group(1))
-        return "" if value is None else str(value)
+        if value is None:
+            if strict:
+                missing.append(m.group(1))
+                return m.group(0)
+            return ""
+        return str(value)
 
-    return _VAR.sub(repl, template)
+    out = _VAR.sub(repl, template)
+    if missing:
+        raise SpecError(f"模板引用了未定义变量: {sorted(set(missing))} | 模板: {template[:120]}")
+    return out
 
 
 def build_context(spec: PipelineSpec, partition: Partition, params: dict) -> dict:
@@ -202,10 +220,30 @@ def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
         for s in raw.get("stages", [])
     ]
 
-    return PipelineSpec(
+    spec = PipelineSpec(
         name=raw.get("name", Path(path).stem),
         stages=stages,
         partitions=partitions,
         description=raw.get("description", ""),
         params=params,
     )
+
+    # 变量校验：YAML 里用到的 {{params.*}} 必须在 params 里显式声明。
+    # Runner 注入的 app_dir / run_id 也要求 YAML 声明（值为空即可）——
+    # 不用白名单放行，否则"忘声明"会被静默容忍，严格模式就失去意义。
+    declared = set(params)
+    used: set[str] = set()
+    for stage in stages:
+        for field in (stage.command, stage.when):
+            used |= set(_VAR.findall(field or ""))
+        for tmpl in stage.artifacts.values():
+            used |= set(_VAR.findall(tmpl))
+    param_used = {u.split(".", 1)[1] for u in used if u.startswith("params.")}
+    unknown = param_used - declared
+    if unknown:
+        raise SpecError(
+            f"{path}: stages 使用了未声明的参数 {sorted(unknown)}；"
+            f"已声明: {sorted(declared)}。请在 params 里补上或由运行方注入。"
+        )
+
+    return spec

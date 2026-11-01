@@ -126,6 +126,9 @@ class Service:
             self.jobs[job_id] = {
                 "job_id": job_id, "status": "queued", "progress_current": 0,
                 "progress_total": 1, "error": None, "result": None,
+                # payload 必须持久化：失败重处理要用原文重跑，
+                # 否则 retry 会以空参数跑一遍并"成功"（静默产出错误结果）
+                "payload": payload,
                 "created_at": time.time(), "updated_at": time.time(),
             }
         self.pool.submit(self._run_job, job_id, payload)
@@ -194,14 +197,17 @@ class Service:
                 + counts.get("generated", 0)}
 
     def retry(self, job_id: str) -> str:
-        """失败任务重处理：重置状态并重新入队。"""
+        """失败任务重处理：用**原始 payload** 重置并重新入队。"""
         job = self.get_job(job_id)
         if job is None:
             raise KeyError(job_id)
         if job["status"] not in ("failed", FAILED):
             raise RuntimeError(f"仅失败任务可重试，当前 {job['status']}")
+        payload = job.get("payload")
+        if payload is None:
+            raise RuntimeError("该任务没有持久化 payload，无法安全重试（可能是旧版本创建的）")
         self._update_job(job_id, status="queued", error=None)
-        self.pool.submit(self._run_job, job_id, job.get("payload") or {})
+        self.pool.submit(self._run_job, job_id, payload)
         return job_id
 
     # ---------------- 优雅停机 ----------------

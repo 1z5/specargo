@@ -5,8 +5,10 @@ description: 批量 TTS 生成 + ASR 回检 + 对账
 
 params:
   python: python3        # 解释器可配置：容器里可能是 python
-  state_db: ""            # 由 CLI/Argo 注入；空则只跑不登记
+  state_db: ""            # 由 CLI 注入；空则只跑不登记
   books_dir: "books"
+  run_id: ""              # 由 Runner 注入（{{workflow.name}} 的对等物），YAML 不赋值
+  app_dir: ""             # 由 Runner 注入（代码目录）
 
 partitions:
   from: list              # list | range | discover
