@@ -62,17 +62,6 @@ jobs:
 
       # ---- 2. 部署 MinIO（S3 兼容对象存储）并配置 Argo artifact repository ----
       # 多节点集群下 hostPath / emptyDir 是节点本地的，跨 Pod 传数据必须走对象存储
-      # 对象存储与 artifact repository（复用已加载的 tts-argo:ci 镜像，无外部依赖）
-      - name: 部署对象存储与 artifact repository
-        run: |
-          set -e
-          kubectl apply -f k8s/object-store.yaml
-          kubectl apply -f k8s/artifact-repository.yaml
-          kubectl rollout status deployment/object-store -n argo --timeout=180s
-          kubectl get pods -n argo -l app=object-store
-          echo "--- artifact repository 配置 ---"
-          kubectl get configmap artifact-repositories -n argo -o yaml | grep -A4 "s3:"
-
       # ---- 2.5 造输入分区（ConfigMap：多节点下任何 Pod 都能读到）----
       - name: 创建 discover 输入 ConfigMap
         run: |
@@ -94,6 +83,19 @@ jobs:
           docker build -f Dockerfile.ci -t tts-argo:ci .
           kind load docker-image tts-argo:ci --name tts-argo
           echo "--- 镜像已加载 ---"
+
+      # ---- 3.5 对象存储与 artifact repository（必须在镜像加载之后）----
+      # 对象存储与 artifact repository（复用已加载的 tts-argo:ci 镜像，无外部依赖）
+      - name: 部署对象存储与 artifact repository
+        run: |
+          set -e
+          kubectl apply -f k8s/object-store.yaml
+          kubectl apply -f k8s/artifact-repository.yaml
+          kubectl rollout status deployment/object-store -n argo --timeout=180s
+          kubectl get pods -n argo -l app=object-store
+          echo "--- artifact repository 配置 ---"
+          kubectl get configmap artifact-repositories -n argo -o yaml | grep -A4 "s3:"
+
 
       # ---- 4. 提交工作流并等待结果（失败则 CI 变红）----
       - name: 提交 ETL DAG 到 Argo
