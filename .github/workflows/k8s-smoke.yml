@@ -193,6 +193,10 @@ jobs:
 
           # 动态工作流：分区数由 discover 决定，Pod 数也应随之推导，不写死
           echo "--- 动态扇出验证 ---"
+          # workflow 名从 @latest 取（编译产物用 spec.name，不再写死 etl-smoke）
+          WF_NAME=$(/tmp/argo get -n argo @latest -o json 2>/dev/null \
+                    | python3 -c "import sys, json; print(json.load(sys.stdin)['metadata']['name'])")
+          echo "workflow 名: $WF_NAME"
           PARTS=$(/tmp/argo get -n argo @latest -o json 2>/dev/null | python3 -c "
           import sys, json
           wf = json.load(sys.stdin)
@@ -202,16 +206,17 @@ jobs:
           ")
           echo "discover 发现并扇出的分区数: $PARTS"
           [ "$PARTS" -ge 3 ] || { echo "❌ 动态扇出分区数不足"; exit 1; }
-          # 期望 Pod 数 = 1(discover) + 4 阶段 × 分区数；onExit 的 Pod 可能已被 podGC 清理
-          EXPECT=$((1 + 4 * PARTS))
-          PODS=$(kubectl get pods -n argo -l workflows.argoproj.io/workflow=etl-smoke \
+          # 期望 Pod 数 = 1(discover) + 3 阶段 × 分区 + 3 gate × 分区
+          # （编译产物含 gate 任务：extract/transform/load 各一个质量闸门）
+          EXPECT=$((1 + 6 * PARTS))
+          PODS=$(kubectl get pods -n argo -l workflows.argoproj.io/workflow="$WF_NAME" \
                  --no-headers 2>/dev/null | wc -l)
-          echo "工作流 Pod 总数: $PODS（期望 $EXPECT = 1 discover + 4×$PARTS；onExit 可能已 GC）"
+          echo "工作流 Pod 总数: $PODS（期望 $EXPECT = 1 discover + 6×$PARTS）"
           [ "$PODS" = "$EXPECT" ] || { echo "❌ 动态扇出数量不符"; exit 1; }
 
           # 跨节点调度：Pod 必须分布在多个节点上
           echo "--- 跨节点调度验证 ---"
-          NODES_USED=$(kubectl get pods -n argo -l workflows.argoproj.io/workflow=etl-smoke \
+          NODES_USED=$(kubectl get pods -n argo -l workflows.argoproj.io/workflow="$WF_NAME" \
                        -o jsonpath='{.items[*].spec.nodeName}' 2>/dev/null | tr ' ' '\n' | sort -u | wc -l)
           echo "Pod 分布到的节点数: $NODES_USED"
           [ "$NODES_USED" -ge 2 ] || { echo "❌ Pod 未跨节点分布"; exit 1; }

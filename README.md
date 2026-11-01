@@ -164,12 +164,14 @@ python3 runner.py ../pipelines/etl-demo.yaml --state-db state.db --workdir /tmp/
 
 ```
 工作流最终状态: Succeeded
-Pod 节点成功数: 21/21              # 1 discover + 4 阶段 × 5 分区
+Pod 节点成功数: 31/31              # 1 discover + 6 × 5 分区（3 阶段 + 3 质量闸门）
 discover 发现并扇出的分区数: 5
-工作流 Pod 总数: 21
-Pod 分布到的节点数: 2              # 9 个在 worker、12 个在 worker2
+Pod 分布到的节点数: 2
 对象存储中的 artifact 对象数: 15   # 5 分区 × (raw + clean + marker)
 ```
+
+**跑的是编译产物**：CI 用 `spec2argo` 把 `pipelines/etl-demo.yaml` 编译成 Argo CRD 再提交，
+不是手写的第二份定义——本地 runner 与集群执行因此共享同一份 spec。
 
 集群拓扑与验证点：
 
@@ -178,7 +180,8 @@ Pod 分布到的节点数: 2              # 9 个在 worker、12 个在 worker2
 | **多节点集群 + 跨节点调度** | kind 1 控制面 + 2 worker；模板加 `podAntiAffinity` 软偏好 | Pod 分布到 2 个 worker（9 + 12） |
 | **动态工作流** | `discover` 任务扫描 ConfigMap 输入产出 JSON 数组，下游 4 阶段用 `withParam` 引用其输出扇出 | 跑哪些分区由数据决定，YAML 里无写死分区 |
 | **对象存储 artifact** | 集群内 S3 兼容端点 + `objstore.py` 按路径契约 `runs/<run_id>/<partition>/<stage>` 传递 | 16 个对象真实落盘；跨 Pod 取数不依赖任何共享卷 |
-| **质量闸门** | `validate` 阶段在集群里跑 `checks.py` 的 `row_count` 插件 | 5/5 分区过检，不过检则 task 失败 |
+| **质量闸门** | 每个 stage 后跟一个 `gate-<stage>` 任务，在集群里跑 `checks.py` 插件 | 不过检则 task 失败（`limit: 0` 不重试） |
+| **一份定义两个目标** | `spec2argo` 把 `pipelines/etl-demo.yaml` 编译成 Argo CRD，CI 提交编译产物 | 本地 runner 与集群不再各写一份 |
 | **重试分层** | extract/load `OnTransientError`，transform/validate `limit: 0` | 语义按失败类型区分 |
 | **onExit 收口** | 无论成败都上传 `run.done` | 收口对象在 bucket 内 |
 
