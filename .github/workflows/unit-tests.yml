@@ -25,6 +25,23 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # 只装编排层依赖：测试不需要 openai / faster-whisper 这些重依赖
+      # （tts_client 的 openai 导入是延迟的，service/runner/spec/state/checks 全部可离线导入）
+      - name: 安装依赖
+        run: |
+          set -e
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "PyYAML>=6.0"
+
+      - name: 校验无隐式依赖（import 全部 app 模块）
+        run: |
+          set -e
+          cd app
+          for m in spec runner state checks checks_tts resume metrics argo_io objstore summary notify; do
+            python3 -c "import $m" || { echo "❌ $m 导入失败（缺依赖？）"; exit 1; }
+          done
+          echo "✅ 全部模块可离线导入"
+
       - name: 跑离线测试（三个套件）
         run: |
           set -e

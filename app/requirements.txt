@@ -1,3 +1,6 @@
+# 编排层：声明式管线定义（spec.py）依赖
+PyYAML>=6.0
+
 # TTS 生成端 (OpenAI TTS API)
 openai>=1.0.0
 
