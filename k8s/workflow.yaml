@@ -1,0 +1,253 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: tts-batch
+  namespace: data-platform
+spec:
+  entrypoint: main
+  serviceAccountName: argo-workflow
+
+  # ---- 全局兜底与清理 ----
+  activeDeadlineSeconds: 14400        # 整批 4 小时硬超时（原实现没有这一层）
+  podGC:
+    strategy: OnWorkflowSuccess       # 成功后清 Pod；失败保留现场供排障
+  ttlStrategy:
+    secondsAfterCompletion: 86400     # 工作流对象保留 1 天
+  artifactGC:
+    strategy: OnWorkflowCompletion    # 中间产物随批清理，防对象存储膨胀
+
+  # ---- 入口参数 ----
+  arguments:
+    parameters:
+    - name: book-slugs                # 本次要跑的书（JSON 文件名 stem），逗号分隔
+      value: "book_a,book_b"
+    - name: voice
+      value: "cedar"
+    - name: run-id
+      value: "{{workflow.name}}"      # run_id 全程贯穿：日志/状态表/报告
+
+  # ---- 卷：item 状态库与书籍输入（多 Pod 共享，必须落在 Pod 之外）----
+  volumes:
+  - name: state
+    persistentVolumeClaim:
+      claimName: tts-state-pvc        # ReadWriteMany；单机演练可换 emptyDir+hostPath
+  - name: output
+    persistentVolumeClaim:
+      claimName: tts-output-pvc       # 产物与报告；也可用 emptyDir（仅同批内共享）
+  - name: books
+    persistentVolumeClaim:
+      claimName: tts-books-pvc        # 书籍 JSON 输入
+
+  templates:
+  # =====================================================================
+  # 主 DAG：生成 -> 校验 -> (失败才) 修复 -> 对账
+  # =====================================================================
+  - name: main
+    dag:
+      tasks:
+      # ---- 1) 生成：按书扇出，一个 Pod 一本书（失败影响面最小）----
+      - name: generate
+        template: gen-book
+        withParam: "{{workflow.parameters.book-slugs}}"
+        arguments:
+          parameters:
+          - {name: slug, value: "{{item}}"}
+          - {name: voice, value: "{{workflow.parameters.voice}}"}
+          - {name: run-id, value: "{{workflow.parameters.run-id}}"}
+
+      # ---- 2) 校验：不重试（数据问题重试无意义），结果写状态表 ----
+      - name: verify
+        template: verify-book
+        dependencies: [generate]
+        arguments:
+          parameters:
+          - {name: slug, value: "{{item}}"}
+          - {name: voice, value: "{{workflow.parameters.voice}}"}
+          - {name: run-id, value: "{{workflow.parameters.run-id}}"}
+
+      # ---- 3) 修复：仅当校验产出 FAIL 才走（when 表达式读上游 outputs）----
+      - name: fix
+        template: fix-book
+        dependencies: [verify]
+        when: "{{tasks.verify.outputs.parameters.status}} == fail"
+        arguments:
+          parameters:
+          - {name: slug, value: "{{item}}"}
+          - {name: voice, value: "{{workflow.parameters.voice}}"}
+          - {name: run-id, value: "{{workflow.parameters.run-id}}"}
+
+      # ---- 4) 对账：expected vs actual，漏数/未过检/重复 -> 失败并告警 ----
+      - name: reconcile
+        template: reconcile-book
+        dependencies: [fix]
+        arguments:
+          parameters:
+          - {name: slug, value: "{{item}}"}
+          - {name: voice, value: "{{workflow.parameters.voice}}"}
+          - {name: run-id, value: "{{workflow.parameters.run-id}}"}
+
+  # =====================================================================
+  # template：生成（单书）
+  # =====================================================================
+  - name: gen-book
+    timeout: "30m"                     # 单书超时（按 章节数 × 3s 限速 + API 耗时估算）
+    retryStrategy:
+      limit: "3"
+      retryPolicy: OnTransientError    # 只重试瞬时错误：限流/网络/5xx
+      backoff:
+        duration: "1m"
+        factor: 2
+        maxDuration: "10m"
+    synchronization:                   # 同一本书不并发跑（对应原 _job_lock 的意图）
+      semaphores:
+      - configMapKeyRef:
+          name: tts-book-lock
+          key: "{{inputs.parameters.slug}}"
+    inputs:
+      parameters:
+      - {name: slug}
+      - {name: voice}
+      - {name: run-id}
+    container:
+      image: registry.example.com/data/tts:v1
+      command: [python, pipeline.py]
+      args:
+        - "--book={{inputs.parameters.slug}}.json"
+        - "--voice={{inputs.parameters.voice}}"
+      env:
+      - {name: TTS_RUN_ID, value: "{{inputs.parameters.run-id}}"}
+      - {name: TTS_STATE_DB, value: "/state/tts_state.db"}
+      - {name: TTS_OUTPUT_DIR, value: "/output"}
+      - {name: TTS_BOOKS_DIR, value: "/books"}
+      - {name: TTS_MAX_RETRIES, value: "1"}     # 瞬时错误交给 Argo 重试，避免两层相乘
+      - name: OPENAI_API_KEY
+        valueFrom:
+          secretKeyRef: {name: tts-secrets, key: openai-api-key}
+      volumeMounts:
+      - {name: state, mountPath: /state}
+      - {name: output, mountPath: /output}
+      resources:
+        requests: {cpu: 200m, memory: 512Mi}
+        limits: {cpu: "1", memory: 1Gi}
+    outputs:
+      parameters:
+      - name: generated-count
+        valueFrom:
+          path: /argo/outputs/parameters/generated-count   # 由 pipeline 侧写入（可选）
+
+  # =====================================================================
+  # template：校验（单书）
+  # =====================================================================
+  - name: verify-book
+    timeout: "20m"
+    retryStrategy:
+      limit: "0"                       # 校验失败是数据问题，不重试
+    inputs:
+      parameters:
+      - {name: slug}
+      - {name: voice}
+      - {name: run-id}
+    container:
+      image: registry.example.com/data/tts:v1
+      command: [python, verify_audio.py]
+      args:
+        - "/output/{{inputs.parameters.slug}}"
+        - "--run-id={{inputs.parameters.run-id}}"
+        - "--state-db=/state/tts_state.db"
+        - "--min-accuracy=0.90"
+      env:
+      - {name: TTS_RUN_ID, value: "{{inputs.parameters.run-id}}"}
+      - {name: TTS_OUTPUT_DIR, value: "/output"}
+      volumeMounts:
+      - {name: state, mountPath: /state}
+      - {name: output, mountPath: /output}
+      resources:
+        requests: {cpu: "1", memory: 2Gi}      # faster-whisper small int8 的内存基线
+        limits: {cpu: "2", memory: 4Gi}
+    outputs:
+      parameters:                          # executor 从 /argo/outputs/parameters 采集
+      - name: status
+        valueFrom: {path: /argo/outputs/parameters/status}
+      - name: fail-count
+        valueFrom: {path: /argo/outputs/parameters/fail-count}
+      - name: missing-count
+        valueFrom: {path: /argo/outputs/parameters/missing-count}
+
+  # =====================================================================
+  # template：修复（复用校验层 --fix：重生成 + 复检 + 失败回滚）
+  # =====================================================================
+  - name: fix-book
+    timeout: "30m"
+    retryStrategy:
+      limit: "2"
+      retryPolicy: OnTransientError
+    inputs:
+      parameters:
+      - {name: slug}
+      - {name: voice}
+      - {name: run-id}
+    container:
+      image: registry.example.com/data/tts:v1
+      command: [python, verify_audio.py]
+      args:
+        - "/output/{{inputs.parameters.slug}}"
+        - "--fix"
+        - "--fix-retries=3"
+        - "--run-id={{inputs.parameters.run-id}}"
+        - "--state-db=/state/tts_state.db"
+      env:
+      - {name: TTS_RUN_ID, value: "{{inputs.parameters.run-id}}"}
+      - name: OPENAI_API_KEY
+        valueFrom:
+          secretKeyRef: {name: tts-secrets, key: openai-api-key}
+      volumeMounts:
+      - {name: state, mountPath: /state}
+      - {name: output, mountPath: /output}
+      resources:
+        requests: {cpu: "1", memory: 2Gi}
+        limits: {cpu: "2", memory: 4Gi}
+
+  # =====================================================================
+  # template：对账（本批次的收口）
+  # =====================================================================
+  - name: reconcile-book
+    inputs:
+      parameters:
+      - {name: slug}
+      - {name: voice}
+      - {name: run-id}
+    container:
+      image: registry.example.com/data/tts:v1
+      command: [python, summary.py]
+      args:
+        - "--state-db=/state/tts_state.db"
+        - "--books=/books/{{inputs.parameters.slug}}.json"
+        - "--voice={{inputs.parameters.voice}}"
+        - "--run-id={{inputs.parameters.run-id}}"
+        - "--report=/output/reconcile-{{inputs.parameters.slug}}.md"
+      env:
+      - {name: TTS_OUTPUT_DIR, value: "/output"}
+      volumeMounts:
+      - {name: state, mountPath: /state}
+      - {name: output, mountPath: /output}
+      - {name: books, mountPath: /books}
+    outputs:
+      parameters:
+      - name: ok
+        valueFrom: {path: /argo/outputs/parameters/ok}
+      - name: missing
+        valueFrom: {path: /argo/outputs/parameters/missing}
+
+  # =====================================================================
+  # onExit：无论成败都收口（汇总 + 告警），对应 JD 职责 6
+  # =====================================================================
+  - name: on-exit
+    onExit: "true"
+    container:
+      image: registry.example.com/data/tts:v1
+      command: [python, notify.py]        # 汇总 run 级结果 + 钉钉/IM 告警（按需实现）
+      args: ["--run-id={{workflow.parameters.run-id}}"]
+      env:
+      - {name: TTS_STATE_DB, value: "/state/tts_state.db"}
+      volumeMounts:
+      - {name: state, mountPath: /state}

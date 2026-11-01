@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+output/
+verify_report/
+*.db
+*.db-wal
+*.db-shm
