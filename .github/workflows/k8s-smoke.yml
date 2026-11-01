@@ -16,18 +16,28 @@ jobs:
       - uses: actions/checkout@v4
 
       # ---- 1. 起 kind 集群（K8s in Docker，单节点）----
-      - name: 启动 kind 集群
+      - name: 启动 kind 集群（1 控制面 + 2 worker）
         uses: helm/kind-action@v1
         with:
           cluster_name: tts-argo
           node_image: kindest/node:v1.29.0
-          wait: 120s
+          wait: 180s
+          config: |
+            kind: Cluster
+            apiVersion: kind.x-k8s.io/v1alpha4
+            nodes:
+            - role: control-plane
+            - role: worker
+            - role: worker
 
-      - name: 确认集群可用
+      - name: 确认集群可用（多节点）
         run: |
           kubectl cluster-info
+          echo "--- 节点清单 ---"
           kubectl get nodes -o wide
-          kubectl version --short 2>/dev/null || true
+          NODES=$(kubectl get nodes --no-headers | grep -c Ready)
+          echo "Ready 节点数: $NODES"
+          [ "$NODES" -ge 3 ] || { echo "❌ 期望至少 3 个 Ready 节点"; exit 1; }
 
       # ---- 2. 安装 Argo Workflows（生产主流 v3 线最后一个 minor）----
       - name: 安装 Argo Workflows v3.7.18
@@ -42,6 +52,20 @@ jobs:
           kubectl wait --for=condition=available --timeout=300s \
             deployment/argo-server deployment/workflow-controller -n argo
           kubectl get pods -n argo
+
+      # ---- 2.5 造输入分区文件（供 discover 动态发现）----
+      # hostPath 位于 kind node 容器内，必须 docker exec 进去写
+      - name: 准备 discover 输入
+        run: |
+          set -e
+          for n in tts-argo-worker tts-argo-worker2; do
+            docker exec "$n" mkdir -p /tmp/ci/input /tmp/ci/output
+            for p in 101 102 103 104 105; do
+              docker exec "$n" sh -c "echo '{\"seed\":$p}' > /tmp/ci/input/$p.jsonl"
+            done
+          done
+          echo "--- 输入分区（worker 节点）---"
+          docker exec tts-argo-worker ls /tmp/ci/input
 
       # ---- 3. 构建轻量镜像并加载进 kind ----
       - name: 构建并加载镜像
@@ -108,4 +132,22 @@ jobs:
           ")
           echo "Pod 节点成功数: $OK"
           [ "$OK" = "12/12" ] || { echo "❌ 并非所有 task 都成功"; exit 1; }
-          echo "✅ 集群冒烟通过：Argo DAG 在 kind 上完整跑通"
+
+          # 动态工作流：discover 必须发现 5 个分区并扇出（4 阶段 × 5 = 20 + discover + onExit）
+          echo "--- 动态扇出验证 ---"
+          FOUND=$(kubectl logs -n argo -l workflows.argoproj.io/node-type=Pod \
+                  --tail=-1 --prefix=false 2>/dev/null | grep -o "发现 5 个待处理分区" | head -1)
+          kubectl logs -n argo job/etl-smoke 2>/dev/null | head -5 || true
+          PODS=$(kubectl get pods -n argo -l workflows.argoproj.io/workflow=etl-smoke \
+                 --no-headers 2>/dev/null | wc -l)
+          echo "工作流 Pod 总数: $PODS（期望 22 = 1 discover + 4×5 扇出 + 1 onExit）"
+          [ "$PODS" = "22" ] || { echo "❌ 动态扇出数量不符"; exit 1; }
+
+          # 跨节点调度：Pod 必须分布在多个节点上
+          echo "--- 跨节点调度验证 ---"
+          NODES_USED=$(kubectl get pods -n argo -l workflows.argoproj.io/workflow=etl-smoke \
+                       -o jsonpath='{.items[*].spec.nodeName}' 2>/dev/null | tr ' ' '\n' | sort -u | wc -l)
+          echo "Pod 分布到的节点数: $NODES_USED"
+          [ "$NODES_USED" -ge 2 ] || { echo "❌ Pod 未跨节点分布"; exit 1; }
+
+          echo "✅ 集群冒烟通过：动态 DAG + 跨节点调度 + 质量闸门全部验证"

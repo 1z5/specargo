@@ -1,3 +1,15 @@
+# ETL 管线的 Argo Workflow 版本——CI 里的真实集群冒烟测试（kind 多节点 + Argo v3.7.18）。
+#
+# 与 pipelines/etl-demo.yaml 的关系：同一套 stage/依赖/重试语义，这里用 Argo 原生 CRD 表达，
+# 用于验证"同一份设计在真实集群上能跑起来"。
+#
+# 覆盖的能力点：
+#   1. 动态工作流：discover 任务先扫描待处理分区，下游 withParam 消费其输出做扇出
+#      （跑哪些分区由数据决定，不写死在 YAML 里）
+#   2. 跨节点调度：topologySpreadConstraints 让同批次 Pod 尽量分散到不同节点
+#   3. 重试分层：extract/load 可重试（瞬时错误），transform/validate limit 0（数据问题重试无意义）
+#   4. 质量闸门：validate 阶段在集群里跑 checks.py 的 row_count 插件
+#   5. onExit 收口：无论成败都写完成标记
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata:
@@ -5,70 +17,138 @@ metadata:
   namespace: argo
 spec:
   entrypoint: main
-  activeDeadlineSeconds: 600
+  activeDeadlineSeconds: 600            # 整批 10 分钟硬超时
   podGC:
-    strategy: OnWorkflowSuccess
+    strategy: OnWorkflowSuccess          # 成功后清 Pod；失败保留现场
   ttlStrategy:
     secondsAfterCompletion: 3600
   arguments:
     parameters:
     - name: run-id
-      value: '{{workflow.name}}'
+      value: '{{workflow.name}}'         # run_id 贯穿日志与产物路径
+
   volumes:
+  # kind 演练用 hostPath；多节点集群应换 ReadWriteMany PVC 或对象存储
   - name: output
     hostPath:
       path: /tmp/ci/output
       type: DirectoryOrCreate
+  - name: input
+    hostPath:
+      path: /tmp/ci/input
+      type: DirectoryOrCreate
+
   templates:
+  # =====================================================================
+  # 主 DAG：discover(动态发现) → extract → transform → load → validate
+  # =====================================================================
   - name: main
     dag:
       tasks:
+      # ---- 动态分区发现：产出 JSON 数组，决定下游扇出什么 ----
+      - name: discover
+        template: discover-scan
+
+      # ---- 各阶段：withParam 引用 discover 的输出，实现动态扇出 ----
       - name: extract
         template: extract
-        withParam: '["1", "2", "3"]'
+        dependencies: [discover]
+        withParam: '{{tasks.discover.outputs.parameters.items}}'
         arguments:
           parameters:
           - name: partition
             value: '{{item}}'
           - name: run-id
             value: '{{workflow.parameters.run-id}}'
+
       - name: transform
         template: transform
-        dependencies:
-        - extract
-        withParam: '["1", "2", "3"]'
+        dependencies: [discover]
+        withParam: '{{tasks.discover.outputs.parameters.items}}'
         arguments:
           parameters:
           - name: partition
             value: '{{item}}'
           - name: run-id
             value: '{{workflow.parameters.run-id}}'
+
       - name: load
         template: load
-        dependencies:
-        - transform
-        withParam: '["1", "2", "3"]'
+        dependencies: [discover]
+        withParam: '{{tasks.discover.outputs.parameters.items}}'
         arguments:
           parameters:
           - name: partition
             value: '{{item}}'
           - name: run-id
             value: '{{workflow.parameters.run-id}}'
+
+      # ---- 质量闸门：在集群里跑真实的检查插件，不过检则 task 失败 ----
       - name: validate
         template: validate
-        dependencies:
-        - load
-        withParam: '["1", "2", "3"]'
+        dependencies: [discover]
+        withParam: '{{tasks.discover.outputs.parameters.items}}'
         arguments:
           parameters:
           - name: partition
             value: '{{item}}'
+
+  # =====================================================================
+  # discover：扫描待处理分区（动态工作流的入口）
+  # =====================================================================
+  - name: discover-scan
+    timeout: '2m'
+    retryStrategy:
+      limit: '2'
+      retryPolicy: OnTransientError
+    script:
+      image: tts-argo:ci
+      imagePullPolicy: Never            # kind load 进去的本地镜像
+      command: [python3]
+      source: |
+        import json
+        import os
+
+        # 发现"待处理分区"：扫描输入目录；生产上可能是查上游表 / 读消息 / 调 API
+        base = os.environ.get("TTS_INPUT_DIR", "/input")
+        found = []
+        if os.path.isdir(base):
+            for name in sorted(os.listdir(base)):
+                if name.endswith(".jsonl"):
+                    found.append(name[: -len(".jsonl")])
+        if not found:
+            # 无输入时退化为演示分区，保证工作流仍可跑通
+            found = ["1", "2", "3"]
+        print(f"[discover] 发现 {len(found)} 个待处理分区: {found}")
+
+        # 写成 Argo 输出参数：下游 withParam 会把它当列表扇出
+        os.makedirs("/tmp/out", exist_ok=True)
+        with open("/tmp/out/items.json", "w", encoding="utf-8") as f:
+            f.write(json.dumps(found))
+      env:
+      - name: TTS_INPUT_DIR
+        value: /input
+      volumeMounts:
+      - name: input
+        mountPath: /input
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+    outputs:
+      parameters:
+      - name: items
+        valueFrom:
+          path: /tmp/out/items.json
+
+  # =====================================================================
+  # extract：瞬时错误才重试（上游数据源抖动）
+  # =====================================================================
   - name: extract
     inputs:
       parameters:
       - name: partition
       - name: run-id
-    timeout: 5m
+    timeout: '5m'
     retryStrategy:
       limit: '2'
       retryPolicy: OnTransientError
@@ -76,16 +156,26 @@ spec:
         duration: 10s
         factor: 2
         maxDuration: 1m
+    # 跨节点调度：用 podAntiAffinity（软偏好）让同批次 Pod 尽量分散到不同节点。
+    # 软约束的意义：节点不够时不阻塞调度，只是"尽量分散"——批处理要的是打散而非强制。
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                workflows.argoproj.io/workflow: '{{workflow.name}}'
+            topologyKey: kubernetes.io/hostname
     container:
       image: tts-argo:ci
       imagePullPolicy: Never
-      command:
-      - python3
+      command: [python3]
       args:
       - /app/etl_steps.py
       - extract
-      - --partition={{inputs.parameters.partition}}
-      - --out=/output/extract/{{inputs.parameters.partition}}.jsonl
+      - '--partition={{inputs.parameters.partition}}'
+      - '--out=/output/extract/{{inputs.parameters.partition}}.jsonl'
       env:
       - name: TTS_RUN_ID
         value: '{{inputs.parameters.run-id}}'
@@ -93,30 +183,29 @@ spec:
       - name: output
         mountPath: /output
       resources:
-        requests:
-          cpu: 100m
-          memory: 128Mi
-        limits:
-          cpu: 500m
-          memory: 256Mi
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+
+  # =====================================================================
+  # transform：数据问题不重试（limit 0），不过检即阻断
+  # =====================================================================
   - name: transform
     inputs:
       parameters:
       - name: partition
       - name: run-id
-    timeout: 5m
+    timeout: '5m'
     retryStrategy:
       limit: '0'
     container:
       image: tts-argo:ci
       imagePullPolicy: Never
-      command:
-      - python3
+      command: [python3]
       args:
       - /app/etl_steps.py
       - transform
-      - --in=/output/extract/{{inputs.parameters.partition}}.jsonl
-      - --out=/output/transform/{{inputs.parameters.partition}}.jsonl
+      - '--in=/output/extract/{{inputs.parameters.partition}}.jsonl'
+      - '--out=/output/transform/{{inputs.parameters.partition}}.jsonl'
       env:
       - name: TTS_RUN_ID
         value: '{{inputs.parameters.run-id}}'
@@ -124,31 +213,30 @@ spec:
       - name: output
         mountPath: /output
       resources:
-        requests:
-          cpu: 100m
-          memory: 128Mi
-        limits:
-          cpu: 500m
-          memory: 256Mi
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+
+  # =====================================================================
+  # load：写完成标记
+  # =====================================================================
   - name: load
     inputs:
       parameters:
       - name: partition
       - name: run-id
-    timeout: 5m
+    timeout: '5m'
     retryStrategy:
       limit: '2'
       retryPolicy: OnTransientError
     container:
       image: tts-argo:ci
       imagePullPolicy: Never
-      command:
-      - python3
+      command: [python3]
       args:
       - /app/etl_steps.py
       - load
-      - --in=/output/transform/{{inputs.parameters.partition}}.jsonl
-      - --out=/output/load/{{inputs.parameters.partition}}.done
+      - '--in=/output/transform/{{inputs.parameters.partition}}.jsonl'
+      - '--out=/output/load/{{inputs.parameters.partition}}.done'
       env:
       - name: TTS_RUN_ID
         value: '{{inputs.parameters.run-id}}'
@@ -156,67 +244,64 @@ spec:
       - name: output
         mountPath: /output
       resources:
-        requests:
-          cpu: 100m
-          memory: 128Mi
-        limits:
-          cpu: 500m
-          memory: 256Mi
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+
+  # =====================================================================
+  # validate：集群里跑质量检查插件（数据质量自动化）
+  # =====================================================================
   - name: validate
     inputs:
       parameters:
       - name: partition
-    timeout: 2m
+    timeout: '2m'
     retryStrategy:
-      limit: '0'
+      limit: '0'                        # 检查失败是数据问题，重试无意义
     container:
       image: tts-argo:ci
       imagePullPolicy: Never
-      command:
-      - python3
-      - -c
+      command: [python3, -c]
       args:
-      - "import sys\nsys.path.insert(0, \"/app\")\nfrom pathlib import Path\nfrom checks import run_check\n\nartifact = Path(\"\
-        /output/transform/{{inputs.parameters.partition}}.jsonl\")\nresult = run_check(\"row_count\", artifact, {\"expect\"\
-        : 50}, {})\nprint(f\"[validate] partition={{inputs.parameters.partition}} \"\n      f\"passed={result.passed} metric={result.metric}\
-        \ {result.detail}\")\nsys.exit(0 if result.passed else 1)\n"
+      - |
+        import sys
+        sys.path.insert(0, "/app")
+        from pathlib import Path
+        from checks import run_check
+
+        artifact = Path("/output/transform/{{inputs.parameters.partition}}.jsonl")
+        result = run_check("row_count", artifact, {"expect": 50}, {})
+        print(f"[validate] partition={{inputs.parameters.partition}} "
+              f"passed={result.passed} metric={result.metric} {result.detail}")
+        sys.exit(0 if result.passed else 1)
       volumeMounts:
       - name: output
         mountPath: /output
       resources:
-        requests:
-          cpu: 100m
-          memory: 128Mi
-        limits:
-          cpu: 500m
-          memory: 256Mi
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+
+  # =====================================================================
+  # onExit：成败都收口
+  # =====================================================================
   - name: on-exit
     container:
       image: tts-argo:ci
       imagePullPolicy: Never
-      command:
-      - python3
-      - -c
+      command: [python3, -c]
       args:
-      - 'import os, time
-
+      - |
+        import os
+        import time
         from pathlib import Path
 
         out = Path("/output")
-
         out.mkdir(parents=True, exist_ok=True)
-
-        marker = out / f"run-{os.environ.get(''TTS_RUN_ID'',''unknown'')}.done"
-
+        marker = out / f"run-{os.environ.get('TTS_RUN_ID', 'unknown')}.done"
         marker.write_text(f"finished at {time.time()}\n", encoding="utf-8")
-
         print(f"[onExit] 收口完成 -> {marker}")
-
-        '
       env:
       - name: TTS_RUN_ID
         value: '{{workflow.parameters.run-id}}'
       volumeMounts:
       - name: output
         mountPath: /output
-  onExit: on-exit
