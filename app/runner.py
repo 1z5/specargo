@@ -84,15 +84,17 @@ class Runner:
         return self.workdir / "out" / stage.name / f"{partition.dataset}_{partition.key}_{partition.variant}"
 
     # ------------------------------------------------------------------
-    def _execute(self, stage, partition: Partition) -> tuple[bool, str]:
-        """执行一个 stage（带超时与重试）。返回 (成功, 输出)。"""
+    def _execute(self, stage, partition: Partition) -> tuple[bool, str, int]:
+        """执行一个 stage（带超时与重试）。返回 (成功, 输出, 实际尝试次数)。"""
         ctx = build_context(self.spec, partition, self.spec.params)
         command = render(stage.command, ctx)
         timeout = parse_duration(stage.timeout)
         policy = stage.retry
 
         last_out = ""
+        attempts = 0
         for attempt in range(1, policy.limit + 2):        # limit=0 也表示至少跑一次
+            attempts = attempt
             try:
                 proc = subprocess.run(
                     command, shell=True, cwd=str(self.workdir),
@@ -100,7 +102,7 @@ class Runner:
                 )
                 last_out = (proc.stdout or "") + (proc.stderr or "")
                 if proc.returncode == 0:
-                    return True, last_out
+                    return True, last_out, attempts
                 reason = f"exit={proc.returncode}"
             except subprocess.TimeoutExpired:
                 reason = f"timeout({stage.timeout})"
@@ -113,8 +115,8 @@ class Runner:
                 self._log(f"      [retry {attempt}/{policy.limit}] {reason}，{delay:.0f}s 后重试")
                 time.sleep(delay)
             else:
-                return False, f"{reason}\n{last_out}"
-        return False, last_out
+                return False, f"{reason}\n{last_out}", attempts
+        return False, last_out, attempts
 
     # ------------------------------------------------------------------
     def _checks(self, stage, partition: Partition) -> list[tuple[str, CheckResult]]:
@@ -165,9 +167,8 @@ class Runner:
 
                 METRICS.inflight.inc(1, stage=stage.name)
                 with METRICS.stage_duration.time(stage=stage.name):
-                    ok, out = self._execute(stage, partition)
+                    ok, out, attempts = self._execute(stage, partition)
                 METRICS.inflight.inc(-1, stage=stage.name)
-                attempts = 0
                 if not ok:
                     self._log(f"      执行失败: {out.strip()[:200]}")
                     self._register(stage, partition, FAILED, attempts)

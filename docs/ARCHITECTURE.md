@@ -1,121 +1,175 @@
 # 架构与数据流
 
-本文描述项目的分层结构、模块职责与数据流转。
+本文描述项目的分层结构、模块职责与数据流转。项目由三部分组成：
+
+| 组成 | 入口 | 定位 |
+|---|---|---|
+| **批处理框架** | `spec.py` + `runner.py` | 声明式管线定义 + 单机执行器（含断点续跑/质量闸门/对账） |
+| **常驻处理服务** | `service.py` | Python 长驻服务（探针/同步异步/优雅停机/失败重处理） |
+| **领域管线** | `pipeline.py` + `verify_audio.py` + `tts_verify/` | TTS 生成 + ASR 回检的具体实现（框架的一个消费者） |
+
+同一套可靠性语义（`resume` / `state` / `checks` / `metrics`）被批处理与服务两侧共享。
+
+---
 
 ## 1. 总体分层
 
-项目按三条工作流组织，代码层相互独立，只通过**文件系统契约**交互：
-
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  数据层 (只读)                                                 │
-│  书籍 JSON ── book_reader.py ──► Book/Chapter 数据模型          │
-└──────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌──────────────────────────────────────────────────────────────┐
-│  生成层 (TTS)                                                  │
-│  main.py (CLI) ─► pipeline.py (编排)                           │
-│                    ├─ text_composer.py (文案拼装)              │
-│                    └─ tts_client.py (OpenAI API 调用)          │
-│  输出: output/<slug>/<slug>_N_<voice>.mp3 + .prompt.txt        │
-│        + .input.txt + .input.sha256                            │
-└──────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌──────────────────────────────────────────────────────────────┐
-│  校验层 (ASR)                                                  │
-│  verify_audio.py (CLI) ─► faster-whisper (转录)                │
-│                    ├─ tts_verify/normalizer.py (归一化)        │
-│                    ├─ tts_verify/comparator.py (对比定位)      │
-│                    └─ tts_verify/reporter.py (报告)            │
-│  输出: verify_report/report.json + report.md                   │
-└──────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌──────────────────────────────────────────────────────────────┐
-│  对账层                                                        │
-│  summary.py ─► state.py (expected vs actual)                   │
-│  输出: 对账报告 + Argo 输出参数 (ok / missing / duplicates)     │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│ 定义层  pipelines/*.yaml ── spec.py ──► PipelineSpec             │
+│         （stage / dependencies / retry / timeout / checks / 分区）│
+└─────────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┴────────────────┐
+              ▼                                ▼
+┌──────────────────────────────┐  ┌──────────────────────────────┐
+│ 执行层 · 批处理               │  │ 执行层 · 常驻服务             │
+│ runner.py（单机执行器）       │  │ service.py（HTTP + 线程池）   │
+│  · 依赖语义（上游失败则跳过） │  │  · /healthz /readyz 探针      │
+│  · 框架级断点续跑             │  │  · /process 同步 /tasks 异步  │
+│  · retryStrategy 分层         │  │  · /tasks/{id}/retry 重处理   │
+│  · 超时 + 质量闸门            │  │  · SIGTERM 四步优雅停机       │
+└──────────────┬───────────────┘  └──────────────┬───────────────┘
+               │                                  │
+               └───────────────┬──────────────────┘
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 可靠性层（两侧共享）                                              │
+│  resume.py   输入指纹 → 跳过判定（断点续跑 + 幂等）               │
+│  state.py    item 级状态表 + expected vs actual 对账              │
+│  checks.py   质量检查插件注册表                                   │
+│  metrics.py  Prometheus 指标（进度/积压/失败率/对账缺失）          │
+│  notify.py   onExit 收口告警                                      │
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 存储层                                                           │
+│  artifacts.py   对象存储抽象（本地目录 / S3 兼容双实现）           │
+│  objstore.py    对象存储 CLI（K8s 里按路径契约跨 Pod 传数据）      │
+│  state 的 SQLite（同 schema 可迁 MySQL/PG）                       │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**关键原则**：生成层不校验，校验层不生成（`--fix` 例外：校验层调用 `tts_client` 重生成，
-这是唯一跨层调用点，且带备份回滚）。
+**关键原则**：
+1. **状态必须落在 Pod/进程之外**——Argo 每个 task 是独立 Pod，服务重启会丢内存；
+   所以 item 状态进 SQLite，产物进对象存储。
+2. **跨 Pod 数据走对象存储的路径契约**，不用 hostPath（多节点下是节点本地的），
+   也不用扇出 artifact 引用（依赖索引匹配，脆弱）。
+3. **重试要分失败类型**：环境性失败（限流/5xx/网络）才重试；
+   确定性失败（内容缺失/格式错）重试只是重复烧钱，应进隔离区走修复分支。
+
+---
 
 ## 2. 模块职责
 
-### 根目录脚本
+### 定义与执行
 
 | 模块 | 职责 | 维护注意 |
 |---|---|---|
-| `main.py` | 生成端 CLI：解析参数、装配 Config、分发多种模式 | 只做分发，不放业务逻辑 |
-| `pipeline.py` | 生成编排：遍历书籍/章节、调 tts_client、控制 API 限速、断点续跑判定、状态登记 | 新增"每音频多块"逻辑改这里 |
-| `tts_client.py` | TTS 封装：调用、重试、落盘影子文件与输入指纹 | 更换引擎时实现同接口 `generate(text, voice, output_path)` |
-| `text_composer.py` | 把 Book/Chapter 拼成 TTS 输入文案 | 模板改动只影响文案 |
-| `book_reader.py` | 读取书籍 JSON → 数据模型 | 输入格式变更改这里 |
-| `models.py` | 纯数据类（Book/BookInfo/Chapter） | 保持无逻辑 |
-| `config.py` | 加载 .env → Config | 新配置项在这里声明默认值 |
-| `verify_audio.py` | 校验 CLI：扫描 → 转录 → 三态判定 → 修复 → 报告 → 对账登记 | 退出码 0/1 供 CI 消费 |
-| `summary.py` | 对账 CLI：expected vs actual，漏数/未过检/重复 | 非零退出码让工作流失败 |
-| `notify.py` | 批次收口：run 级汇总 + webhook 告警 | 未配置 webhook 时只打日志 |
+| `spec.py` | YAML → `PipelineSpec`（Stage/Partition/RetryPolicy）；模板渲染；变量校验 | 渲染默认严格模式，未定义变量抛 `SpecError` |
+| `runner.py` | 单机 stage 执行器：依赖语义、断点续跑、重试、超时、质量闸门、对账收口 | 近似"单机版 workflow-controller" |
+| `service.py` | 常驻服务：探针、同步/异步接口、失败重处理、优雅停机 | job 记录在内存，状态登记进 SQLite |
 
-### 可靠性模块
-
-| 模块 | 职责 |
-|---|---|
-| `resume.py` | 输入指纹（sha256）与跳过判定——断点续跑与幂等的落地 |
-| `state.py` | item 级状态表（run/item 两表）+ 对账 + 重复检测 |
-| `argo_io.py` | Argo 输出参数/artifact 写入，把业务结果暴露给工作流下游 |
-
-### tts_verify/ 包（校验层）
+### 可靠性层（批处理与服务共享）
 
 | 模块 | 职责 | 接口 |
 |---|---|---|
-| `normalizer.py` | 归一化文本（小写、去标点、数字词→数字、数字占位、连字符双形态） | `normalize(text) -> str` |
-| `comparator.py` | 词级 SequenceMatcher 对比，提取漏读/错读 | `compare(src, tgt, min_gap_words) -> Comparison` |
-| `sentence_matcher.py` | 句子级模糊匹配与三态判定 | `find_sentence_results(...)` |
-| `reporter.py` | 结果数据类 + JSON/MD 报告 | `FileResult`, `Report` |
+| `resume.py` | 输入 sha256 指纹 + 产物存在性判定 | `should_skip(path, text)` / `write_fingerprint()` |
+| `state.py` | item 状态表（dataset/partition/variant/stage 四元组主键）+ 对账 | `upsert_generic_item()` / `reconcile_generic()` |
+| `checks.py` | 检查插件注册表 + 4 个通用检查 | `register()` / `run_check()` |
+| `checks_tts.py` | ASR 三态判定注册为插件（领域知识不进框架） | `@register("asr_three_state")` |
+| `metrics.py` | Counter/Gauge/Histogram + Prometheus text 输出 | `METRICS` 单例 / `write_file()` |
+| `notify.py` | run 级汇总 + webhook 告警（可插拔） | `build_summary()` / `send_webhook()` |
+
+### 存储层
+
+| 模块 | 职责 |
+|---|---|
+| `artifacts.py` | 对象存储**抽象**：`ArtifactStore` 协议 + 本地目录 / S3 兼容双实现；key 目录穿越防护；`digest()` 用于变更检测 |
+| `objstore.py` | 对象存储 **CLI**（K8s Pod 内用）：按路径契约 `runs/<run_id>/<partition>/<stage>.<ext>` put/get |
+
+### 领域层（TTS 管线，框架的消费者）
+
+| 模块 | 职责 |
+|---|---|
+| `pipeline.py` | 生成编排：逐文件判定跳过、限速、状态登记、单书 CLI |
+| `tts_client.py` | OpenAI TTS 封装：调用、指数退避、影子文件与输入指纹 |
+| `verify_audio.py` | 校验 CLI：扫描 → 转录 → 三态判定 → 修复 → 报告 → 对账登记 |
+| `tts_verify/` | 校验核心：`normalizer` / `sentence_matcher` / `comparator` / `reporter` |
+| `summary.py` | 对账 CLI：expected vs actual + Argo 输出参数 + 非零退出码 |
+| `etl_steps.py` | ETL demo 三步（证明框架与 TTS 无关） |
+
+---
 
 ## 3. 关键数据流
 
-### 3.1 生成流
+### 3.1 批处理流（runner）
 
 ```
-find_book_json_files(books_dir)             # 递归找 *.json
-  └─► 每本书: read_book() → Book
-        └─► generate_book():
-              ├─ opening: compose_opening(book)      → <slug>_0_<voice>.mp3
-              ├─ 每章:    compose_chapter(chapter)    → <slug>_N_<voice>.mp3
-              └─ closing: compose_closing(book)      → <slug>_<N+1>_<voice>.mp3
-  每文件之间 sleep(api_delay_seconds)        # 限速
-  每个文件生成前: should_skip() 判定 → 命中则跳过（断点续跑）
-  每个文件成功后: 落盘 .input.sha256 + tts_item 状态登记
+load_spec(pipelines/x.yaml)          # 严格校验：使用变量 ⊆ 声明参数
+  └─► for stage in spec.stages:
+        for partition in spec.partitions:
+          ├─ 依赖判定：上游 failed/skipped → 本 stage 标 skipped（不被下游成功掩盖）
+          ├─ 断点续跑：该 (stage×partition) 已 verified → 跳过
+          ├─ 执行：render(command) → subprocess（timeout + retryStrategy）
+          ├─ 质量闸门：run_check() 不过 → failed（阻断交付）
+          └─ 状态登记：upsert_generic_item(dataset, partition, variant, stage)
+  └─► 收口：按 (dataset, variant) 分组对账 → 报告 + 指标 + Argo 输出参数 + 退出码
 ```
 
-- 章节号：优先 `chapter.chapter_id`，缺失时用序号
-- **每章节 = 一次 TTS 调用**，这是漏读的主要诱因（见 VERIFICATION.md）
-- `tts_client.generate()` 每次调用先落盘 `.prompt.txt`（日志）与 `.input.txt`（原文基准），
-  成功后落盘 `.input.sha256`（输入指纹）
-
-### 3.2 校验流
+### 3.2 常驻服务流（service）
 
 ```
-verify_audio.py <音频目录>
-  └─► 扫描音频 → 转录(带缓存) → 提取原文(.input.txt 优先)
-        └─► 句子级三态判定 → 词级覆盖率/准确率
-              └─► (--fix) 失败重生成 + 复检 + 回滚
-                    └─► report.json / report.md + tts_item 登记 + Argo 输出参数
+POST /tasks {payload}
+  └─► 落 job 记录（含 payload，供 retry 复用）→ 线程池执行
+        └─► 处理模块.process(payload) → 成功登记 verified / 失败登记 failed
+POST /tasks/{id}/retry
+  └─► 仅 failed 可重试；用**原始 payload** 重新入队（无 payload 则拒绝）
+
+SIGTERM → begin_drain()（/readyz 立刻 503）
+        → 等 Endpoints 传播（等价 K8s preStop sleep）
+        → 等在途任务完成（有上限）
+        → checkpoint → 停止 accept → 退出
 ```
+
+### 3.3 集群流（Argo，见 `k8s/workflow-etl-smoke.yaml`）
+
+```
+discover（扫描 ConfigMap 输入 → 输出 JSON 数组）
+  └─► extract / transform / load / validate
+        各自 withParam 引用 discover 输出做动态扇出
+        跨 Pod 数据经对象存储路径契约传递（objstore.py）
+        onExit 上传 run.done 收口
+```
+
+---
 
 ## 4. 与 Argo Workflows 的对应关系
 
 | 本项目概念 | Argo 概念 |
 |---|---|
-| `generate_book()` 的四段 plan（opening/各章/closing） | DAG task 依赖 |
-| `tts_client` 的指数退避重试 | `retryStrategy`（limit/backoff/retryPolicy） |
-| `should_skip()` 输入指纹判定 | 任务幂等（Argo 只保证"再执行一次"，安全性由任务自己保证） |
-| `tts_item` 状态表 | 外部状态存储（Pod 之间不能靠 emptyDir 共享） |
-| `summary.py` 对账 | DAG 末节点 / `onExit` 汇总 |
-| `verify_audio.py` 退出码 + Argo 输出参数 | node `outputs.parameters` 供 `when` 分支 |
-| `pipeline.py --book X` 单书入口 | `withItems` 扇出，一个 Pod 一本书 |
+| `spec.stages` + `dependencies` | DAG `tasks` + `dependencies` |
+| `partitions` + `withParam` 扇出 | `withItems` / `withParam` |
+| `RetryPolicy`（limit/policy/backoff） | `retryStrategy` |
+| `Stage.timeout` / 整批超时 | template `timeout` / `activeDeadlineSeconds` |
+| `resume.should_skip()` | 任务幂等（Argo 只保证"再执行一次"，安全性由任务自己保证） |
+| `state.upsert_generic_item()` | 外部状态存储（Pod 之间不能靠 emptyDir 共享） |
+| `reconcile_generic()` | DAG 末节点 / `onExit` 对账 |
+| `metrics.METRICS` | controller 指标 + 自定义指标 |
+| `service.py` 的探针与停机 | liveness / readiness / startup + preStop + terminationGracePeriod |
+
+> **尚未实现**：把 `PipelineSpec` 编译成 Argo CRD 的 `spec2argo` 编译器。
+> 目前本地 runner 与集群 workflow 是两份定义（`pipelines/etl-demo.yaml` 与
+> `k8s/workflow-etl-smoke.yaml`），存在漂移风险——这是已记录在
+> `docs/ROADMAP.md` 的下一步。
+
+---
+
+## 5. k8s/ 目录说明
+
+| 文件 | 状态 |
+|---|---|
+| `workflow-etl-smoke.yaml` | **CI 实测跑通**（kind 多节点 + Argo v3.7.18） |
+| `object-store.yaml` / `artifact-repository.yaml` | **CI 实测**（S3 兼容端点 + 默认仓库注解） |
+| `workflow.yaml` / `cronworkflow.yaml` | **文档级示例**：TTS 管线的 Argo 版本，引用 `registry.example.com` 镜像与 3 个 PVC，未在 CI 部署（需自备镜像与存储）。仅通过 `argo lint` schema 校验 |

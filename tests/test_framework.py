@@ -292,6 +292,28 @@ def test_reconcile_single_variant_unchanged():
         assert r["missing"] == ["1"] and r["ok"] is False, r
 
 
+def test_runner_records_real_attempt_count():
+    """attempt 必须是真实重试次数，不是恒为 0（否则状态表该列无意义）。"""
+    with tempfile.TemporaryDirectory() as d:
+        work = Path(d); (work / "out").mkdir()
+        counter = work / "n"
+        # 前两次失败、第三次成功 -> 应记录 attempt=3
+        cmd = ("n=$(cat " + str(counter) + " 2>/dev/null || echo 0); n=$((n+1)); "
+               "echo $n > " + str(counter) + "; "
+               "if [ $n -lt 3 ]; then exit 1; fi; "
+               "mkdir -p out/e && echo x > out/e/1.jsonl")
+        spec = PipelineSpec(
+            name="a", partitions=[Partition("ds", "1")],
+            stages=[Stage(name="e", command=cmd, outputs=["raw"],
+                          artifacts={"raw": "out/e/1.jsonl"},
+                          retry=RetryPolicy(limit=3, duration="1s"),
+                          checks=["file_nonempty"])],
+        )
+        r = Runner(spec, workdir=work, verbose=False).run()
+        assert r.ok, [x.detail for x in r.runs]
+        assert r.runs[0].attempts == 3, r.runs[0]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

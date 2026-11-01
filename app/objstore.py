@@ -32,21 +32,25 @@ import sys
 from pathlib import Path
 
 
-def _client():
-    import boto3
+def _store():
+    """按环境变量选存储实现（本地目录 / S3 兼容），复用 artifacts 层。
 
-    endpoint = os.getenv("OBJSTORE_ENDPOINT", "http://object-store.argo.svc.cluster.local:5000")
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint,
+    这样本 CLI 与单机代码走同一份存储抽象，只有端点配置不同。
+    """
+    from artifacts import LocalArtifactStore, S3ArtifactStore
+
+    kind = os.getenv("OBJSTORE_KIND", "s3")
+    if kind == "local":
+        return LocalArtifactStore(os.getenv("OBJSTORE_ROOT", "./artifacts"))
+    return S3ArtifactStore(
+        bucket=os.getenv("OBJSTORE_BUCKET", "argo-artifacts"),
+        endpoint=os.getenv("OBJSTORE_ENDPOINT",
+                           "http://object-store.argo.svc.cluster.local:5000"),
+        prefix=os.getenv("OBJSTORE_PREFIX", ""),
         aws_access_key_id=os.getenv("OBJSTORE_ACCESS_KEY", "test-access-key"),
         aws_secret_access_key=os.getenv("OBJSTORE_SECRET_KEY", "test-secret-key"),
         region_name=os.getenv("OBJSTORE_REGION", "us-east-1"),
     )
-
-
-def _bucket() -> str:
-    return os.getenv("OBJSTORE_BUCKET", "argo-artifacts")
 
 
 def contract_key(run_id: str, partition: str, stage: str, ext: str = "jsonl") -> str:
@@ -58,7 +62,7 @@ def put(key: str, file: Path) -> str:
     src = Path(file)
     if not src.exists():
         raise FileNotFoundError(f"待上传文件不存在: {src}")
-    _client().upload_file(str(src), _bucket(), key)
+    _store().put(src, key)
     print(f"[objstore] put {key} ({src.stat().st_size} bytes)")
     return key
 
@@ -66,25 +70,17 @@ def put(key: str, file: Path) -> str:
 def get(key: str, file: Path) -> Path:
     dest = Path(file)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    _client().download_file(_bucket(), key, str(dest))
+    _store().get(key, dest)
     print(f"[objstore] get {key} -> {dest} ({dest.stat().st_size} bytes)")
     return dest
 
 
 def exists(key: str) -> bool:
-    try:
-        _client().head_object(Bucket=_bucket(), Key=key)
-        return True
-    except Exception:
-        return False
+    return _store().exists(key)
 
 
 def list_keys(prefix: str = "") -> list[str]:
-    keys: list[str] = []
-    paginator = _client().get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=_bucket(), Prefix=prefix):
-        keys.extend(o["Key"] for o in page.get("Contents", []))
-    return sorted(keys)
+    return _store().list(prefix)
 
 
 def main() -> int:

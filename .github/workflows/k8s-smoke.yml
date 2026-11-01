@@ -143,8 +143,20 @@ jobs:
           kubectl get pods -n argo -o wide | tee /tmp/evidence/pods.txt
           kubectl get events -n argo --sort-by=.lastTimestamp | tail -40 \
             | tee /tmp/evidence/events.txt
-          echo "--- 产物文件 ---"
-          find /tmp/ci/output -type f 2>/dev/null | head -20 | tee /tmp/evidence/artifacts.txt
+          echo "--- 对象存储中的 artifact（路径契约产物）---"
+          POD=$(kubectl get pods -n argo -l app=object-store \
+               -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec -n argo "$POD" -- python3 -c "
+          import boto3
+          s3 = boto3.client('s3', endpoint_url='http://127.0.0.1:5000',
+                            aws_access_key_id='test-access-key',
+                            aws_secret_access_key='test-secret-key')
+          for b in s3.list_buckets().get('Buckets', []):
+              r = s3.list_objects_v2(Bucket=b['Name'])
+              print(f"bucket {b['Name']}: {r.get('KeyCount', 0)} objects")
+              for o in r.get('Contents', []):
+                  print('  ', o['Key'])
+          " 2>&1 | tee /tmp/evidence/artifacts.txt
           echo "--- validate 阶段输出（质量闸门）---"
           grep -h "\[validate\]" /tmp/evidence/*.txt 2>/dev/null || true
 

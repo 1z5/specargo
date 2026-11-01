@@ -1,5 +1,6 @@
 # tts-pipeline-argo
 
+![unit-tests](https://github.com/1z5/tts-pipeline-argo/actions/workflows/unit-tests.yml/badge.svg)
 ![k8s smoke](https://github.com/1z5/tts-pipeline-argo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一条完整的数据管线案例：批量生成 → 独立回检 → 失败修复 → 对账收口，用 Argo Workflows 编排。**
@@ -7,6 +8,10 @@
 编排本身是框架化的（声明式 runner + 插件化质量检查），并包含常驻处理服务、对象存储抽象
 与 Prometheus 指标——覆盖任务调度、断点续跑、质量校验、状态登记到可观测告警的完整链路。
 批处理侧与常驻服务侧共享同一套可靠性语义。
+
+> **边界（说清楚，不含糊）**：本地 runner 与集群 workflow 目前是**两份定义**，
+> `spec → Argo CRD` 的编译器还没写，存在漂移风险。这是已列入
+> [`docs/ROADMAP.md`](docs/ROADMAP.md) 的下一步，不是已完成能力。
 
 设计来自我在内容生产团队做批量 TTS 管线的真实经验，重构为可复现的开源参考实现：
 把"跑完"变成"跑对"——任务编排、断点续跑、幂等、质量校验、对账、告警六个环节都有代码。
@@ -62,7 +67,7 @@ python verify_audio.py output/book_a --min-accuracy 0.90
 # 对账：expected vs actual，漏数/未过检/重复 → 非零退出码
 python summary.py --state-db state.db --books books/book_a.json --voice cedar
 
-# 测试（32 个用例，不需要 API key 与集群）
+# 测试（40 个用例，不需要 API key 与集群；CI 双 Python 版本自动跑）
 cd .. && python3 tests/test_framework.py && python3 tests/test_service_and_storage.py
 
 # 本地 lint Argo YAML（离线，无需集群）
@@ -144,10 +149,12 @@ python3 runner.py ../pipelines/etl-demo.yaml --state-db state.db --workdir /tmp/
 
 ## 已验证 / 未验证
 
-**已验证（32 个离线测试 + 三次 E2E）**：
-- 框架 13 例：resume 跳过、依赖阻断、重试成功、四类检查、对账抓漏、命名碰撞回归
-- 服务/存储/指标 9 例：**真实起服务进程**验证探针、异步任务全生命周期、同步调用、
-  `/metrics`、SIGTERM 后 `/readyz` 先返 503 再退出（退出码 0）
+**已验证（40 个离线测试 + 集群 E2E）**：
+- 框架 17 例：resume 跳过、依赖阻断、重试成功、四类检查、对账抓漏（含多 variant 假绿回归）、
+  严格模板校验、attempt 计数语义
+- 服务/存储/指标 11 例：**真实起服务进程**验证探针、异步任务全生命周期、同步调用、
+  `/metrics`、SIGTERM 后 `/readyz` 先返 503 再退出（退出码 0）、retry 用原始 payload、
+  objstore 本地模式往返与 CLI 退出码
 - 存储 4 例：目录/文件往返、目录穿越拒绝、digest 稳定、工厂分发
 - 原有 10 例：指纹跳过、输入变化、对账、幂等写入、重复检测
 - E2E：ETL 管线 9 verified / 二次跑 9 resume-skipped / 指标文件内容正确 / 服务冒烟含优雅停机
@@ -232,7 +239,7 @@ app/            应用代码
 pipelines/      声明式管线定义（tts.yaml / etl-demo.yaml）
 k8s/            Argo 编排（Workflow / CronWorkflow）
 tests/          离线测试（23 个用例：框架 + 断点续跑 + 对账）
-docs/           架构与校验机制说明
+docs/           架构、校验机制、ROADMAP（下一步计划）
 ```
 
 ## English Summary

@@ -276,6 +276,67 @@ def test_retry_uses_original_payload():
     assert job["result"] == {"echo": "important-data"}, job
 
 
+def test_objstore_local_mode_roundtrip():
+    """objstore CLI 本地模式：put/get/exists/list（S3 未覆盖时的最小保障）。"""
+    import importlib
+    import os
+
+    objstore = importlib.import_module("objstore")
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["OBJSTORE_KIND"] = "local"
+        os.environ["OBJSTORE_ROOT"] = d
+        src = Path(d) / "raw.jsonl"
+        src.write_text("1\n2\n3\n", encoding="utf-8")
+
+        key = objstore.contract_key("run-1", "101", "raw")
+        assert key == "runs/run-1/101/raw.jsonl", key
+        objstore.put(key, src)
+        assert objstore.exists(key)
+
+        dest = Path(d) / "back.jsonl"
+        objstore.get(key, dest)
+        assert dest.read_text(encoding="utf-8") == "1\n2\n3\n"
+        assert key in objstore.list_keys("runs/")
+
+        # 不存在的 key：exists False，get 抛错（CLI 里转为退出码 1）
+        assert not objstore.exists("runs/run-1/999/raw.jsonl")
+        try:
+            objstore.get("runs/run-1/999/raw.jsonl", Path(d) / "nope.jsonl")
+            raise AssertionError("应抛 FileNotFoundError")
+        except FileNotFoundError:
+            pass
+
+
+def test_objstore_cli_exit_codes():
+    """CLI 的退出码语义：exists 用退出码表达（shell 里好判断）。"""
+    import os
+    import subprocess
+    import sys
+
+    app_dir = Path(__file__).resolve().parents[1] / "app"
+    with tempfile.TemporaryDirectory() as d:
+        env = dict(os.environ)
+        env["OBJSTORE_KIND"] = "local"
+        env["OBJSTORE_ROOT"] = d
+        src = Path(d) / "a.jsonl"
+        src.write_text("x\n", encoding="utf-8")
+
+        p = subprocess.run([sys.executable, "objstore.py", "put",
+                            "--key", "runs/r/1/raw.jsonl", "--file", str(src)],
+                           cwd=app_dir, env=env, capture_output=True, text=True)
+        assert p.returncode == 0, p.stderr
+
+        p = subprocess.run([sys.executable, "objstore.py", "exists",
+                            "--key", "runs/r/1/raw.jsonl"],
+                           cwd=app_dir, env=env, capture_output=True, text=True)
+        assert p.returncode == 0 and p.stdout.strip() == "true", (p.returncode, p.stdout)
+
+        p = subprocess.run([sys.executable, "objstore.py", "exists",
+                            "--key", "runs/r/2/raw.jsonl"],
+                           cwd=app_dir, env=env, capture_output=True, text=True)
+        assert p.returncode == 1 and p.stdout.strip() == "false", (p.returncode, p.stdout)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
