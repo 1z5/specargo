@@ -152,26 +152,61 @@ python3 runner.py ../pipelines/etl-demo.yaml --state-db state.db --workdir /tmp/
 - 原有 10 例：指纹跳过、输入变化、对账、幂等写入、重复检测
 - E2E：ETL 管线 9 verified / 二次跑 9 resume-skipped / 指标文件内容正确 / 服务冒烟含优雅停机
 
-**已在真实集群跑通（kind + Argo Workflows v3.7.18，CI 每次 push 自动验证）**：
+**已在真实集群跑通（kind 多节点 + Argo Workflows v3.7.18，CI 每次 push 自动验证）**：
 
 ```
-$ argo list -n argo
-NAME        STATUS      AGE   DURATION
-etl-smoke   Succeeded   1m    1m
-
 工作流最终状态: Succeeded
-Pod 节点成功数: 12/12        # 4 阶段 × 3 分区 + onExit = 13 个 Pod 全部 Completed
+Pod 节点成功数: 21/21              # 1 discover + 4 阶段 × 5 分区
+discover 发现并扇出的分区数: 5
+工作流 Pod 总数: 21
+Pod 分布到的节点数: 2              # 9 个在 worker、12 个在 worker2
+对象存储中的 artifact 对象数: 16   # 5 raw + 5 clean + 5 marker + 1 run.done
 ```
 
-- `k8s/workflow-etl-smoke.yaml`：extract → transform → load → validate 四阶段 DAG，
-  `withParam` 按 3 个分区扇出，`retryStrategy` 分层，validate 在集群里跑 `checks.py` 插件
-- CI 流程：起 kind 集群 → 装 Argo v3.7.18 → 构建镜像并 `kind load` →
-  `argo lint` + `argo submit --watch` → 硬断言（Succeeded 且 12/12）
-- 证据（workflow YAML / Pod 清单 / 事件）作为 artifact 上传，保留 30 天
+集群拓扑与验证点：
 
-**仍未实测（诚实边界）**：多节点集群与跨节点调度、ReadWriteMany PVC、
-S3/MinIO artifact repository、生产规模（千级 Pod）的 controller 限流与积压；
-容器内 requests/limits 为估算值。这些正是我在真实生产环境里要继续补的。
+| 能力 | 怎么验的 | 结果 |
+|---|---|---|
+| **多节点集群 + 跨节点调度** | kind 1 控制面 + 2 worker；模板加 `podAntiAffinity` 软偏好 | Pod 分布到 2 个 worker（9 + 12） |
+| **动态工作流** | `discover` 任务扫描 ConfigMap 输入产出 JSON 数组，下游 4 阶段用 `withParam` 引用其输出扇出 | 跑哪些分区由数据决定，YAML 里无写死分区 |
+| **对象存储 artifact** | 集群内 S3 兼容端点 + `objstore.py` 按路径契约 `runs/<run_id>/<partition>/<stage>` 传递 | 16 个对象真实落盘；跨 Pod 取数不依赖任何共享卷 |
+| **质量闸门** | `validate` 阶段在集群里跑 `checks.py` 的 `row_count` 插件 | 5/5 分区过检，不过检则 task 失败 |
+| **重试分层** | extract/load `OnTransientError`，transform/validate `limit: 0` | 语义按失败类型区分 |
+| **onExit 收口** | 无论成败都上传 `run.done` | 收口对象在 bucket 内 |
+
+```bash
+# 本地 lint（离线，无需集群）
+argo lint --offline k8s/workflow-etl-smoke.yaml
+
+# 手动触发集群冒烟
+gh workflow run k8s-smoke -R 1z5/tts-pipeline-argo
+```
+
+### 架构决策：为什么用路径契约而不是 artifact 引用
+
+`{{tasks.extract.outputs.artifacts.raw}}` 这种引用依赖**扇出索引匹配**：上下游分区列表
+必须完全一致且顺序相同，Argo 才能按 index 配对。CI 里实测过它的脆弱性
+（`Unable to resolve: tasks.extract.outputs.artifacts.raw`）。所以改为显式路径契约：
+
+```
+契约 key = runs/<run_id>/<partition>/<stage>.<ext>
+```
+
+上下游只约定 key 怎么算，不依赖编排器的配对行为——大规模扇出、部分失败重试、
+上下游分区列表不同都不会断。这也是许多生产平台的常见做法。
+
+### 集群实测中修掉的 4 个问题
+
+1. **多节点下 hostPath 不共享**：extract 在 worker2 写 `/output`，transform 在 worker
+   读不到 → 大量 exit 1。跨 Pod 数据必须走对象存储或 RWX PVC。
+2. **`moto_server` 默认只绑 127.0.0.1**：集群内探针连接被拒 → 显式 `-H 0.0.0.0`。
+3. **artifact-repositories 缺注解**：v3.x 靠 `workflows.argoproj.io/default-artifact-repository`
+   注解指定默认仓库，缺了控制器不加载任何仓库，executor 报
+   "You need to configure artifact storage"（exit 64）。
+4. **bucket 需显式创建**：moto 启动为空，不像 MinIO 在启动命令里 mkdir。
+
+**仍未实测**：千级 Pod 规模的 controller 限流与积压、ReadWriteMany PVC、
+生产级 MinIO/OSS 的真实吞吐、多副本高可用。这些需要更大集群与真实数据量。
 
 ## 目录
 
