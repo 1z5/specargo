@@ -1,5 +1,7 @@
 # tts-pipeline-argo
 
+![k8s smoke](https://github.com/1z5/tts-pipeline-argo/actions/workflows/k8s-smoke.yml/badge.svg)
+
 **一条完整的数据管线案例：批量生成 → 独立回检 → 失败修复 → 对账收口，用 Argo Workflows 编排。
 编排已框架化（声明式 runner + 插件化检查），并补齐常驻服务、对象存储与 Prometheus 指标——
 覆盖「数据管线工程师」JD 的六条职责与七条要求。**
@@ -60,8 +62,14 @@ python verify_audio.py output/book_a --min-accuracy 0.90
 # 对账：expected vs actual，漏数/未过检/重复 → 非零退出码
 python summary.py --state-db state.db --books books/book_a.json --voice cedar
 
-# 测试（9 个用例，不需要 API key 与集群）
-cd .. && python3 tests/test_resume_state.py
+# 测试（32 个用例，不需要 API key 与集群）
+cd .. && python3 tests/test_framework.py && python3 tests/test_service_and_storage.py
+
+# 本地 lint Argo YAML（离线，无需集群）
+argo lint --offline k8s/workflow-etl-smoke.yaml
+
+# 集群冒烟（CI 自动跑；也可手动触发）
+gh workflow run k8s-smoke -R 1z5/tts-pipeline-argo
 ```
 
 ## Argo Workflows 编排
@@ -144,8 +152,26 @@ python3 runner.py ../pipelines/etl-demo.yaml --state-db state.db --workdir /tmp/
 - 原有 10 例：指纹跳过、输入变化、对账、幂等写入、重复检测
 - E2E：ETL 管线 9 verified / 二次跑 9 resume-skipped / 指标文件内容正确 / 服务冒烟含优雅停机
 
-**未验证**：未在真实 K8s 集群跑过（Pod 调度、PVC、镜像拉取、artifact repository 未实测）；
-容器内资源配额为估算；并发与扇出上限需集群数据校准。
+**已在真实集群跑通（kind + Argo Workflows v3.7.18，CI 每次 push 自动验证）**：
+
+```
+$ argo list -n argo
+NAME        STATUS      AGE   DURATION
+etl-smoke   Succeeded   1m    1m
+
+工作流最终状态: Succeeded
+Pod 节点成功数: 12/12        # 4 阶段 × 3 分区 + onExit = 13 个 Pod 全部 Completed
+```
+
+- `k8s/workflow-etl-smoke.yaml`：extract → transform → load → validate 四阶段 DAG，
+  `withParam` 按 3 个分区扇出，`retryStrategy` 分层，validate 在集群里跑 `checks.py` 插件
+- CI 流程：起 kind 集群 → 装 Argo v3.7.18 → 构建镜像并 `kind load` →
+  `argo lint` + `argo submit --watch` → 硬断言（Succeeded 且 12/12）
+- 证据（workflow YAML / Pod 清单 / 事件）作为 artifact 上传，保留 30 天
+
+**仍未实测（诚实边界）**：多节点集群与跨节点调度、ReadWriteMany PVC、
+S3/MinIO artifact repository、生产规模（千级 Pod）的 controller 限流与积压；
+容器内 requests/limits 为估算值。这些正是我在真实生产环境里要继续补的。
 
 ## 目录
 
