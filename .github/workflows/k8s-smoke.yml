@@ -92,6 +92,11 @@ jobs:
           kubectl apply -f k8s/object-store.yaml
           kubectl apply -f k8s/artifact-repository.yaml
           kubectl rollout status deployment/object-store -n argo --timeout=180s
+          # controller 启动时读取 artifact-repositories ConfigMap；若 ConfigMap 是后创建的，
+          # 必须重启 controller 才会加载（否则 executor 报
+          # "You need to configure artifact storage"）
+          kubectl rollout restart deployment/workflow-controller -n argo
+          kubectl rollout status deployment/workflow-controller -n argo --timeout=180s
           kubectl get pods -n argo -l app=object-store
           echo "--- artifact repository 配置 ---"
           kubectl get configmap artifact-repositories -n argo -o yaml | grep -A4 "s3:"
