@@ -42,13 +42,14 @@ CREATE TABLE IF NOT EXISTS tts_item (
     book_slug   TEXT NOT NULL,
     chapter_num TEXT NOT NULL,      -- "0"=opening, "N"=章节, "N+1"=closing（与文件名一致）
     voice       TEXT NOT NULL,
+    stage       TEXT NOT NULL DEFAULT '',   -- 框架化新增：多 stage 管线必须带 stage 维度
     status      TEXT NOT NULL,
     attempt     INTEGER NOT NULL DEFAULT 0,
     coverage    REAL,
     accuracy    REAL,
     run_id      TEXT,
     updated_at  TEXT,
-    PRIMARY KEY (book_slug, chapter_num, voice)
+    PRIMARY KEY (book_slug, chapter_num, voice, stage)
 );
 CREATE INDEX IF NOT EXISTS idx_item_run ON tts_item(run_id);
 """
@@ -105,19 +106,25 @@ def upsert_item(
     attempt: int | None = None,
     coverage: float | None = None,
     accuracy: float | None = None,
+    stage: str = "",
 ) -> None:
-    """幂等写入：同一 (book, chapter, voice) 只保留一行，重跑即更新。"""
+    """幂等写入：同一 (dataset, partition, variant, stage) 只保留一行，重跑即更新。
+
+    ⚠️ stage 必须进主键：多 stage 管线里，若只有 (dataset, partition, variant)，
+    后一个 stage 的状态会覆盖前一个，"生成成功但校验没过"就查不出来了。
+    （这是把单stage管线框架化成多stage时真实踩到的坑。）
+    """
     existing = conn.execute(
-        "SELECT attempt FROM tts_item WHERE book_slug=? AND chapter_num=? AND voice=?",
-        (book_slug, chapter_num, voice),
+        "SELECT attempt FROM tts_item WHERE book_slug=? AND chapter_num=? AND voice=? AND stage=?",
+        (book_slug, chapter_num, voice, stage),
     ).fetchone()
     next_attempt = (existing["attempt"] if existing else 0) + (1 if attempt is None else attempt)
     conn.execute(
         """
-        INSERT INTO tts_item(book_slug, chapter_num, voice, status, attempt,
+        INSERT INTO tts_item(book_slug, chapter_num, voice, stage, status, attempt,
                              coverage, accuracy, run_id, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(book_slug, chapter_num, voice) DO UPDATE SET
+        VALUES(?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(book_slug, chapter_num, voice, stage) DO UPDATE SET
             status=excluded.status,
             attempt=excluded.attempt,
             coverage=COALESCE(excluded.coverage, tts_item.coverage),
@@ -125,16 +132,17 @@ def upsert_item(
             run_id=excluded.run_id,
             updated_at=excluded.updated_at
         """,
-        (book_slug, chapter_num, voice, status, next_attempt,
+        (book_slug, chapter_num, voice, stage, status, next_attempt,
          coverage, accuracy, run_id, now()),
     )
     conn.commit()
 
 
-def get_item(conn: sqlite3.Connection, book_slug: str, chapter_num: str, voice: str):
+def get_item(conn: sqlite3.Connection, book_slug: str, chapter_num: str, voice: str,
+             stage: str = ""):
     return conn.execute(
-        "SELECT * FROM tts_item WHERE book_slug=? AND chapter_num=? AND voice=?",
-        (book_slug, chapter_num, voice),
+        "SELECT * FROM tts_item WHERE book_slug=? AND chapter_num=? AND voice=? AND stage=?",
+        (book_slug, chapter_num, voice, stage),
     ).fetchone()
 
 
@@ -246,3 +254,51 @@ def scan_duplicate_files(output_dir: Path, book_slug: str, voice: str) -> list[s
         if len(names) > 1:
             problems.append(f"输入相同(指纹 {fp[:8]})的多个产物: {names}")
     return problems
+
+
+# ---------------------------------------------------------------------------
+# 通用别名（框架化）：item key 泛化为 (dataset, partition, variant)
+#    列名沿用 book_slug/chapter_num/voice，语义上是 dataset/partition/variant
+#    ——不重建表是为了兼容既有数据与测试；新代码一律用下面这组别名
+# ---------------------------------------------------------------------------
+
+def upsert_generic_item(conn, *, dataset: str, partition: str, variant: str = "",
+                        status: str, run_id: str | None = None, attempt: int | None = None,
+                        coverage=None, accuracy=None, stage: str = "") -> None:
+    upsert_item(conn, book_slug=dataset, chapter_num=partition, voice=variant,
+                status=status, run_id=run_id, attempt=attempt,
+                coverage=coverage, accuracy=accuracy, stage=stage)
+
+
+def items_for_generic(conn, dataset: str, variant: str = "") -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM tts_item WHERE book_slug=? AND voice=? ORDER BY chapter_num",
+        (dataset, variant),
+    ).fetchall()
+
+
+def reconcile_generic(conn, dataset: str, expected, final_stage: str | None = None) -> dict:
+    """对账：expected 由**调用方（管线定义）**给出，不再从领域数据推导。
+
+    ``expected`` 是 (dataset, partition, variant) 三元组列表——
+    TTS 管线来自书籍 JSON 推导，ETL 管线来自时间窗，两者走同一套对账。
+    ``final_stage``：只按最后一个 stage 判定是否交付（多 stage 管线的正确语义：
+    中间 stage 成功不代表整条管线成功）。
+    """
+    expected_keys = [p[1] for p in expected if p[0] == dataset]
+    if final_stage:
+        rows = {r["chapter_num"]: r for r in conn.execute(
+            "SELECT * FROM tts_item WHERE book_slug=? AND stage=?",
+            (dataset, final_stage)).fetchall()}
+    else:
+        rows = {r["chapter_num"]: r for r in items_for_generic(conn, dataset, "")}
+    missing = [k for k in expected_keys if k not in rows]
+    not_verified = [k for k in expected_keys if k in rows and rows[k]["status"] != VERIFIED]
+    return {
+        "dataset": dataset,
+        "expected": len(expected_keys),
+        "verified": len(expected_keys) - len(missing) - len(not_verified),
+        "missing": missing,
+        "not_verified": not_verified,
+        "ok": not missing and not not_verified,
+    }

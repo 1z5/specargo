@@ -1,6 +1,7 @@
 # tts-pipeline-argo
 
-**一条完整的数据管线案例：批量生成 → 独立回检 → 失败修复 → 对账收口，并用 Argo Workflows 编排。**
+**一条完整的数据管线案例：批量生成 → 独立回检 → 失败修复 → 对账收口，用 Argo Workflows 编排；
+编排本身已框架化——同一个声明式 runner 能跑 TTS 管线，也能跑与 TTS 无关的 ETL。**
 
 设计来自我在内容生产团队做批量 TTS 管线的真实经验，重构为可复现的开源参考实现：
 把"跑完"变成"跑对"——任务编排、断点续跑、幂等、质量校验、对账、告警六个环节都有代码。
@@ -78,6 +79,43 @@ argo submit -n data-platform k8s/workflow.yaml -p book-slugs=book_a,book_b --wat
 5. **口径统一是隐蔽的坑**。产物文件名用 JSON 文件名 stem，而数据模型的 slug 由标题派生，
    两者经常不同——对账用错口径会 100% 误报"漏生成"。（这个 bug 在开发中真实踩到并修复。）
 
+## 框架化：从"TTS 管线"到"可复用的批量任务引擎"
+
+第二版把领域逻辑从编排里剥出去，同一个 runner 现在能跑**与 TTS 无关**的管线：
+
+```
+声明式定义(YAML) ─► spec.py 解析 ─► runner.py 执行 ─► checks.py 质量闸门 ─► state.py 登记对账
+                                      │
+                                      └─ 断点续跑 / 依赖语义 / 重试策略 / 超时，全部在框架层
+```
+
+| 能力 | 原实现（TTS 专用） | 框架化后 |
+|---|---|---|
+| 编排 | `pipeline.py` 写死四段 | YAML 声明 stage + dependencies |
+| 分区 | (book, chapter, voice) 硬编码 | (dataset, partition, variant) 通用，支持 list/range/discover |
+| 质量检查 | ASR 三态判定写死在 verify_audio.py | 插件注册表；ASR 只是其中一个 check |
+| 断点续跑 | 在 tts_client 里（任务层） | **框架层**：已 verified 的 (stage×partition) 直接跳过 |
+| 对账 | 从书籍 JSON 推导 expected | expected 由管线定义给出，按 dataset 分组 |
+
+**两个实例证明普适性**（都不含对方的知识）：
+- `pipelines/tts.yaml` — TTS 生成 + ASR 回检（`asr_three_state` 插件）
+- `pipelines/etl-demo.yaml` — extract → transform → load，用 `json_schema`/`row_count` 通用检查
+
+```bash
+cd app
+python3 runner.py ../pipelines/etl-demo.yaml --state-db state.db --workdir /tmp/run
+python3 runner.py ../pipelines/etl-demo.yaml --state-db state.db --workdir /tmp/run   # 第二次：全部 resume 跳过
+```
+
+### 框架化过程中真实踩到并修掉的 4 个坑
+
+1. **item 主键缺 stage 维度**：多 stage 管线里，后一个 stage 的状态会覆盖前一个，
+   "生成成功但校验没过"就查不出来 → 主键加入 stage。
+2. **对账用错 dataset**：用管线名而不是 `partition.dataset` 去对账，导致 `expected=0`、
+   假绿——正是本项目要防的那类故障 → 按 dataset 分组对账。
+3. **依赖语义缺失**：上游失败后下游照样跑，还会用下游的成功掩盖上游失败 → 实现 `dependencies` 阻断。
+4. **json_schema 不认 JSONL**：直接 `json.loads` 整个文件会在第二行报 "Extra data" → 逐行解析回退。
+
 ## 已验证 / 未验证
 
 **已验证**：9 个离线测试（指纹跳过、输入变化、对账抓漏、幂等写入、两类重复检测）；
@@ -90,6 +128,11 @@ argo submit -n data-platform k8s/workflow.yaml -p book-slugs=book_a,book_b --wat
 
 ```
 app/            应用代码
+  spec.py         声明式管线定义（YAML → Stage/Partition/RetryPolicy）
+  runner.py       通用 stage 执行器（断点续跑/依赖/重试/超时/对账）
+  checks.py       质量检查插件注册表 + 4 个通用检查
+  checks_tts.py   TTS 领域检查（ASR 三态判定，插件方式注入）
+  etl_steps.py    ETL demo 的三个步骤（证明框架普适性）
   resume.py       输入指纹与跳过判定
   state.py        item 状态表 + 对账 + 重复检测
   argo_io.py      Argo 输出参数/artifact
@@ -99,8 +142,9 @@ app/            应用代码
   tts_client.py   TTS 客户端（指纹跳过 + 重试可配）
   verify_audio.py 校验 CLI（三态判定 + 状态登记 + Argo outputs）
   tts_verify/     校验核心包
+pipelines/      声明式管线定义（tts.yaml / etl-demo.yaml）
 k8s/            Argo 编排（Workflow / CronWorkflow）
-tests/          离线测试
+tests/          离线测试（23 个用例：框架 + 断点续跑 + 对账）
 docs/           架构与校验机制说明
 ```
 

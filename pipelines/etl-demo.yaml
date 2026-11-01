@@ -1,0 +1,52 @@
+# 通用 ETL 管线（框架化的第二个实例，证明与 TTS 无关）
+# 没有任何 ASR/TTS 知识：用 schema + row_count 两个通用检查做质量闸门
+name: etl-demo
+description: 抽取 → 转换 → 校验 → 装载（纯通用，用于验证框架普适性）
+
+params:
+  python: python3        # 解释器可配置：容器里可能是 python
+  state_db: ""
+
+partitions:
+  from: range             # 时间窗分区：start..end（真实数仓的分区形态）
+  dataset: dwd_order
+  start: 1
+  end: 3
+
+variants: [""]            # 单变体
+
+stages:
+  # ---- 抽取：产出 JSONL ----
+  - name: extract
+    command: "{{params.python}} {{params.app_dir}}/etl_steps.py extract --partition {{partition.key}} --out out/extract/{{partition.key}}.jsonl"
+    outputs: [raw]
+    artifacts:
+      raw: "out/extract/{{partition.key}}.jsonl"
+    checks: [file_nonempty, row_count]
+    check_config:
+      row_count: {min: 1}
+    retry: {policy: OnTransientError, limit: 2, backoff: {duration: 30s, factor: 2}}
+    timeout: 10m
+
+  # ---- 转换：字段规范化 ----
+  - name: transform
+    command: "{{params.python}} {{params.app_dir}}/etl_steps.py transform --in out/extract/{{partition.key}}.jsonl --out out/transform/{{partition.key}}.jsonl"
+    dependencies: [extract]
+    outputs: [clean]
+    artifacts:
+      clean: "out/transform/{{partition.key}}.jsonl"
+    checks: [json_schema]
+    check_config:
+      json_schema: {required: [order_id, amount, dt]}
+    retry: {limit: 0}      # 数据问题不重试
+    timeout: 10m
+
+  # ---- 装载：写入目标库（这里用落盘模拟）----
+  - name: load
+    command: "{{params.python}} {{params.app_dir}}/etl_steps.py load --in out/transform/{{partition.key}}.jsonl --out out/load/{{partition.key}}.done"
+    dependencies: [transform]
+    outputs: [marker]
+    artifacts:
+      marker: "out/load/{{partition.key}}.done"
+    checks: [file_nonempty]
+    timeout: 10m
