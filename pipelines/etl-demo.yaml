@@ -8,22 +8,39 @@ params:
   state_db: ""            # 由 CLI 注入；空则只跑不登记
   run_id: ""              # 由 Runner 注入，YAML 不赋值
   app_dir: ""             # 由 Runner 注入（代码目录）
+  work_dir: "out"         # 产物根目录：本地相对路径；集群由编译器注入 /output
+
+# 集群执行目标：spec2argo 编译器读取这一段生成 Argo CRD
+k8s:
+  image: tts-argo:ci
+  image_pull_policy: Never
+  volumes:
+    output: {hostPath: {path: /tmp/ci/output, type: DirectoryOrCreate}}
+    input: {configMap: {name: etl-input-partitions}}
+  mounts: {output: /output, input: /input}
 
 partitions:
-  from: range             # 时间窗分区：start..end（真实数仓的分区形态）
+  # discover：跑哪些分区由数据决定，不写死在 YAML 里。
+  # 同一条命令在本地（无 /input 时退化为 1..3）和集群（ConfigMap 挂载 5 个分区）都适用
+  from: discover
   dataset: dwd_order
-  start: 1
-  end: 3
+  command: |
+    if ls /input/*.jsonl >/dev/null 2>&1; then
+      ls /input/*.jsonl | xargs -n1 basename | sed 's/\.jsonl$//'
+    else
+      # 每行一个分区（JSON 数组转换按行切分；echo "1 2 3" 会被当成一个元素）
+      printf "%s\n" 1 2 3
+    fi
 
 variants: [""]            # 单变体
 
 stages:
   # ---- 抽取：产出 JSONL ----
   - name: extract
-    command: "{{params.python}} {{params.app_dir}}/etl_steps.py extract --partition {{partition.key}} --out out/extract/{{partition.key}}.jsonl"
+    command: "{{params.python}} {{params.app_dir}}/etl_steps.py extract --partition {{partition.key}} --out {{params.work_dir}}/extract/{{partition.key}}.jsonl"
     outputs: [raw]
     artifacts:
-      raw: "out/extract/{{partition.key}}.jsonl"
+      raw: "{{params.work_dir}}/extract/{{partition.key}}.jsonl"
     checks: [file_nonempty, row_count]
     check_config:
       row_count: {min: 1}
@@ -32,11 +49,12 @@ stages:
 
   # ---- 转换：字段规范化 ----
   - name: transform
-    command: "{{params.python}} {{params.app_dir}}/etl_steps.py transform --in out/extract/{{partition.key}}.jsonl --out out/transform/{{partition.key}}.jsonl"
+    command: "{{params.python}} {{params.app_dir}}/etl_steps.py transform --in {{params.work_dir}}/extract/{{partition.key}}.jsonl --out {{params.work_dir}}/transform/{{partition.key}}.jsonl"
     dependencies: [extract]
     outputs: [clean]
+    consumes: [raw]                     # 消费 extract 的产物（集群侧由对象存储 get）
     artifacts:
-      clean: "out/transform/{{partition.key}}.jsonl"
+      clean: "{{params.work_dir}}/transform/{{partition.key}}.jsonl"
     checks: [json_schema]
     check_config:
       json_schema: {required: [order_id, amount, dt]}
@@ -45,10 +63,11 @@ stages:
 
   # ---- 装载：写入目标库（这里用落盘模拟）----
   - name: load
-    command: "{{params.python}} {{params.app_dir}}/etl_steps.py load --in out/transform/{{partition.key}}.jsonl --out out/load/{{partition.key}}.done"
+    command: "{{params.python}} {{params.app_dir}}/etl_steps.py load --in {{params.work_dir}}/transform/{{partition.key}}.jsonl --out {{params.work_dir}}/load/{{partition.key}}.done"
     dependencies: [transform]
     outputs: [marker]
+    consumes: [clean]                    # 消费 transform 的产物
     artifacts:
-      marker: "out/load/{{partition.key}}.done"
+      marker: "{{params.work_dir}}/load/{{partition.key}}.done"
     checks: [file_nonempty]
     timeout: 10m

@@ -119,7 +119,9 @@ jobs:
 
 
       # ---- 4. 提交工作流并等待结果（失败则 CI 变红）----
-      - name: 提交 ETL DAG 到 Argo
+      # ---- 4. 从同一份 spec 编译出集群 workflow 并提交 ----
+      # 关键：跑的是 pipelines/etl-demo.yaml 的编译产物，不是手写的第二份定义
+      - name: 编译并提交 ETL DAG 到 Argo
         run: |
           set -e
           ARGO_VERSION=v3.7.18
@@ -129,8 +131,17 @@ jobs:
           gunzip -f /tmp/argo.gz            # 得到 /tmp/argo
           chmod +x /tmp/argo
           /tmp/argo version
-          /tmp/argo lint -n argo k8s/workflow-etl-smoke.yaml
-          /tmp/argo submit -n argo k8s/workflow-etl-smoke.yaml --watch
+
+          # 编译产物（与 unit-tests 用的是同一个编译器）
+          python3 app/spec2argo.py pipelines/etl-demo.yaml -o /tmp/compiled/etl-demo.yaml
+          echo "--- 编译产物 template 清单 ---"
+          python3 -c "
+          import yaml
+          d = yaml.safe_load(open('/tmp/compiled/etl-demo.yaml', encoding='utf-8'))
+          print('  ', [t['name'] for t in d['spec']['templates']])
+          "
+          /tmp/argo lint -n argo /tmp/compiled/etl-demo.yaml
+          /tmp/argo submit -n argo /tmp/compiled/etl-demo.yaml --watch
 
       # ---- 5. 收集证据（无论成败）----
       - name: 收集运行证据

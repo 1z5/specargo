@@ -73,6 +73,15 @@ jobs:
           cd app
           python3 runner.py ../pipelines/etl-demo.yaml --dry-run 2>&1 | head -20
 
+      - name: 编译 pipeline 定义成 Argo CRD（spec2argo）
+        run: |
+          set -e
+          mkdir -p /tmp/compiled
+          for f in pipelines/*.yaml; do
+            echo "--- 编译 $f ---"
+            python3 app/spec2argo.py "$f" -o "/tmp/compiled/$(basename "$f")"
+          done
+
       - name: lint 全部 k8s 编排（schema 级校验）
         run: |
           set -e
@@ -81,7 +90,7 @@ jobs:
             "https://github.com/argoproj/argo-workflows/releases/download/${ARGO_VERSION}/argo-linux-amd64.gz"
           gunzip -f /tmp/argo.gz
           chmod +x /tmp/argo
-          for f in k8s/*.yaml; do
+          for f in k8s/*.yaml /tmp/compiled/*.yaml; do
             # object-store / artifact-repository 是原生 K8s 资源，argo lint 不认识，跳过
             case "$f" in
               *object-store.yaml|*artifact-repository.yaml) continue ;;

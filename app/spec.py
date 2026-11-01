@@ -74,8 +74,10 @@ class Stage:
     timeout: str = "30m"
     checks: list[str] = field(default_factory=list)
     when: str = ""                    # 条件表达式（对应 Argo 的 when）
-    artifacts: dict[str, str] = field(default_factory=dict)   # name -> 路径模板
+    artifacts: dict[str, str] = field(default_factory=dict)   # name -> 路径模板（本 stage 产出）
+    consumes: list[str] = field(default_factory=list)         # 消费的上游 artifact 名
     check_config: dict = field(default_factory=dict)          # 检查名 -> 配置
+    resources: dict = field(default_factory=dict)             # K8s requests/limits
 
 
 @dataclass
@@ -97,6 +99,11 @@ class PipelineSpec:
     description: str = ""
     # 批次级参数（可被 CLI / Argo arguments 覆盖）
     params: dict = field(default_factory=dict)
+    # 集群执行目标（spec2argo 读取；本地 runner 忽略）
+    k8s: dict = field(default_factory=dict)
+    # 分区来源：list / range / discover（discover 时由 discover_command 产出）
+    partitions_source: str = "list"
+    discover_command: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +222,9 @@ def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
             checks=list(s.get("checks", [])),
             when=str(s.get("when", "")),
             artifacts=dict(s.get("artifacts", {}) or {}),
+            consumes=list(s.get("consumes", []) or []),
             check_config=dict(s.get("check_config", {}) or {}),
+            resources=dict(s.get("resources", {}) or {}),
         )
         for s in raw.get("stages", [])
     ]
@@ -226,6 +235,9 @@ def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
         partitions=partitions,
         description=raw.get("description", ""),
         params=params,
+        k8s=dict(raw.get("k8s", {}) or {}),
+        partitions_source=source,
+        discover_command=str(part_cfg.get("command", "")),
     )
 
     # 变量校验：YAML 里用到的 {{params.*}} 必须在 params 里显式声明。

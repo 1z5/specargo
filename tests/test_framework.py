@@ -314,6 +314,108 @@ def test_runner_records_real_attempt_count():
         assert r.runs[0].attempts == 3, r.runs[0]
 
 
+# ===================== spec2argo 编译器 =====================
+
+def _load_etl_spec():
+    return load_spec(str(Path(__file__).resolve().parents[1] / "pipelines" / "etl-demo.yaml"))
+
+
+def test_compile_produces_valid_dag_shape():
+    """编译产物：DAG 形状、模板集合、依赖关系正确。"""
+    from spec2argo import compile_workflow
+
+    spec = _load_etl_spec()
+    wf = compile_workflow(spec)
+    assert wf["kind"] == "Workflow"
+    assert wf["spec"]["entrypoint"] == "main"
+
+    tmpls = {t["name"] for t in wf["spec"]["templates"]}
+    # 每个 stage 一个模板 + 每个带 checks 的 stage 一个 gate 模板 + discover + main
+    assert {"main", "discover-scan", "extract", "transform", "load",
+            "gate-extract", "gate-transform", "gate-load"} <= tmpls, tmpls
+
+    dag = next(t for t in wf["spec"]["templates"] if t["name"] == "main")["dag"]
+    tasks = {t["name"]: t for t in dag["tasks"]}
+    assert tasks["extract"]["dependencies"] == ["discover"]
+    assert tasks["transform"]["dependencies"] == ["discover", "extract"]
+    # 扇出引用 discover 输出，不是写死列表
+    assert "tasks.discover.outputs.parameters.items" in tasks["extract"]["withParam"]
+
+
+def test_compile_preserves_retry_policy():
+    """retryStrategy 分层必须保留：extract 可重试，transform limit 0。"""
+    from spec2argo import compile_workflow
+
+    spec = _load_etl_spec()
+    wf = compile_workflow(spec)
+    by_name = {t["name"]: t for t in wf["spec"]["templates"]}
+    assert by_name["extract"]["retryStrategy"]["limit"] == "2"
+    assert by_name["extract"]["retryStrategy"]["retryPolicy"] == "OnTransientError"
+    assert by_name["transform"]["retryStrategy"]["limit"] == "0"
+    # gate 永远不重试（检查失败是数据问题）
+    assert by_name["gate-extract"]["retryStrategy"]["limit"] == "0"
+
+
+def test_compile_wires_object_store_contract():
+    """跨 Pod 数据必须接线成 get→执行→put，且 key 一致。"""
+    from spec2argo import compile_workflow
+
+    spec = _load_etl_spec()
+    wf = compile_workflow(spec)
+    by_name = {t["name"]: t for t in wf["spec"]["templates"]}
+
+    extract_script = by_name["extract"]["container"]["args"][0]
+    assert "objstore.py put" in extract_script and "raw.jsonl" in extract_script
+
+    transform_script = by_name["transform"]["container"]["args"][0]
+    assert "objstore.py get" in transform_script and "raw.jsonl" in transform_script
+    assert "objstore.py put" in transform_script and "clean.jsonl" in transform_script
+
+    # 上下游 key 必须一致（否则下游取不到上游产物）
+    assert 'runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl' in extract_script
+    assert 'runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl' in transform_script
+
+    # 产物路径翻到集群挂载点，不能用相对路径
+    assert "/output/" in transform_script
+    assert "out/" not in transform_script.replace("/output/", "")
+
+
+def test_compile_emits_gate_for_checks():
+    """有 checks 的 stage 必须生成独立 gate 任务，且跑真实插件。"""
+    from spec2argo import compile_workflow
+
+    spec = _load_etl_spec()
+    wf = compile_workflow(spec)
+    by_name = {t["name"]: t for t in wf["spec"]["templates"]}
+    gate = by_name["gate-extract"]["container"]["args"][0]
+    assert "from checks import run_check" in gate
+    assert "row_count" in gate and "file_nonempty" in gate
+    assert "sys.exit(1 if failed else 0)" in gate
+
+
+def test_compile_discover_outputs_json_array():
+    """discover 必须输出 JSON 数组字符串，否则 withParam 展不开。"""
+    from spec2argo import compile_workflow
+
+    spec = _load_etl_spec()
+    wf = compile_workflow(spec)
+    disc = next(t for t in wf["spec"]["templates"] if t["name"] == "discover-scan")
+    outs = disc["outputs"]["parameters"]
+    assert outs[0]["name"] == "items"
+    assert outs[0]["valueFrom"]["path"] == "/tmp/out/items.json"
+    assert "json.dumps" in disc["script"]["args"][0]
+
+
+def test_compile_is_deterministic():
+    """同一 spec 编译两次结果一致（可做 drift 检测）。"""
+    from spec2argo import compile_workflow
+
+    spec = _load_etl_spec()
+    a = compile_workflow(spec)
+    b = compile_workflow(spec)
+    assert a == b
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
