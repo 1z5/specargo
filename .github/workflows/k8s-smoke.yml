@@ -165,6 +165,7 @@ jobs:
           echo "工作流最终状态: $PHASE"
           [ "$PHASE" = "Succeeded" ] || { echo "❌ 工作流未成功"; exit 1; }
           # 12 个 task 节点（4 阶段 × 3 分区）必须全部 Succeeded
+          # 动态计算：不写死数量（分区数由 discover 决定，可能是 5 也可能是 50）
           OK=$(/tmp/argo get -n argo @latest -o json 2>/dev/null | python3 -c "
           import sys, json
           wf = json.load(sys.stdin)
@@ -174,7 +175,8 @@ jobs:
           print(f'{succeeded}/{len(nodes)}')
           ")
           echo "Pod 节点成功数: $OK"
-          [ "$OK" = "12/12" ] || { echo "❌ 并非所有 task 都成功"; exit 1; }
+          TOTAL=${OK#*/}; DONE=${OK%/*}
+          [ "$DONE" = "$TOTAL" ] || { echo "❌ 并非所有 task 都成功: $OK"; exit 1; }
 
           # 动态工作流：discover 必须发现 5 个分区并扇出（4 阶段 × 5 = 20 + discover + onExit）
           echo "--- 动态扇出验证 ---"
