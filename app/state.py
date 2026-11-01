@@ -1,15 +1,15 @@
 """item 级状态登记与对账（原实现完全没有的一层）。
 
-对应 JD：
-    - 职责 2 "排查数据遗漏" -> ``reconcile()`` 做 expected vs actual 差集
-    - 职责 4 "结果登记"    -> 每个 item 有终态 + run_id + 证据路径
-    - 要求 6 "数据遗漏、重复、错位" -> 漏生成 / 未过检 / 重复文件三类检查
+要解决的三件事：
+    - 数据遗漏 -> ``reconcile()`` 做 expected vs actual 差集
+    - 结果登记 -> 每个 item 有终态 + run_id + 证据路径
+    - 重复/错位 -> 漏生成 / 未过检 / 重复文件三类检查
 
 为什么用 SQLite 而不是文件：
     Argo 的每个 task 是一个独立 Pod，Pod 之间只能通过**外部存储**共享状态。
     emptyDir 随 Pod 消失，所以状态必须落在 Pod 之外：
     单机/测试用 SQLite，上集群换同一个 schema 的 MySQL/PostgreSQL 即可
-    （迁移成本只剩连接串——这是我会在面试里说的设计取舍）。
+    （迁移成本只剩连接串）。
 
 状态机（与 _legacy 的 ExpandJob.status 同构，粒度更细到 item）：
     pending -> generated -> verified
@@ -171,7 +171,7 @@ def expected_item_keys(book: Book, voice: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# 对账：expected vs actual（JD "排查数据遗漏"的落地）
+# 对账：expected vs actual
 # ---------------------------------------------------------------------------
 
 def reconcile(conn: sqlite3.Connection, book_slug: str, book: Book, voice: str) -> dict:
@@ -208,7 +208,7 @@ def reconcile(conn: sqlite3.Connection, book_slug: str, book: Book, voice: str) 
 
 
 def scan_duplicate_files(output_dir: Path, book_slug: str, voice: str) -> list[str]:
-    """磁盘级重复检测（对应 JD 要求 6 的"重复、错位"）。
+    """磁盘级重复检测（重复、错位）。
 
     两类重复：
       A. 同一 (chapter_num, voice) 出现多个产物文件 —— 重复写入 / 拷贝残留

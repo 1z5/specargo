@@ -5,7 +5,7 @@
     - 对每个 (stage × partition)：跳过判定 → 执行（超时 + 重试）→ 质量检查 → 状态登记
     - 收口：对账（expected vs actual）+ 报告 + Argo 输出参数 + 退出码
 
-与 Argo 的对应关系（面试可讲）：
+与 Argo Workflows 的对应关系：
     本 runner ≈ 单机版的 workflow-controller；上集群后同一份 spec 可由
     Argo 解释执行（每个 stage 一个 template，partition 用 withItems 扇出），
     两者共享同一套 resume/state/checks 语义——这是"定义与执行分离"的价值。

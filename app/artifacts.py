@@ -1,4 +1,4 @@
-"""对象存储抽象：artifact 的存取（JD 要求 4 明确点名"熟悉对象存储"）。
+"""对象存储抽象：artifact 的存取。
 
 为什么需要它：
     Argo 的每个 task 是独立 Pod，**artifact 必须走 Pod 之外的存储**。

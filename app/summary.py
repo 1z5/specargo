@@ -1,9 +1,9 @@
 """对账汇总：把"跑完"升级成"跑对"（原实现缺的最后一环）。
 
-对应 JD：
-    - 职责 2 "排查数据遗漏"：expected（书籍 JSON 应有章节）vs actual（状态表已登记）
-    - 职责 4 "异常定位、修复和结果复核"：输出可执行的差集清单
-    - 职责 6 "对重复故障开展根因分析"：run 级汇总 + 退出码供 CI/工作流判断
+要解决的三件事：
+    - 数据遗漏：expected（管线声明应有）vs actual（状态表已登记）
+    - 异常定位：输出可执行的差集清单，而不是一堆日志
+    - 可判定：run 级汇总 + 退出码，供 CI / 工作流判断是否放行
 
 作为 Argo 的 onExit / 末节点运行：无论上游成败都收口，输出
     /argo/outputs/parameters/{expected,generated,verified,failed,missing,ok}

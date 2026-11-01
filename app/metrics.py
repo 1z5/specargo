@@ -1,9 +1,11 @@
-"""Prometheus 指标：进度跟踪、积压、失败率的数据源（JD 职责 2/6）。
+"""Prometheus 指标：进度跟踪、积压、失败率的数据源。
 
-对应 JD：
-    - 职责 2 "跟踪任务进度"        -> ``stage_progress`` / ``backlog`` gauge
-    - 职责 2 "排查失败、超时、积压" -> ``stage_runs_total{status}`` / ``stage_duration_seconds``
-    - 职责 6 "完善日志、监控、告警" -> 标准 text 格式，可直接被 Prometheus scrape
+要回答的是运维时的三个问题：
+    - 任务走到哪了        -> ``stage_progress`` / ``backlog`` gauge
+    - 有没有失败/超时/积压 -> ``stage_runs_total{status}`` / ``stage_duration_seconds``
+    - 数据有没有少        -> ``reconcile_missing`` / ``reconcile_not_verified``
+
+输出标准 Prometheus text 格式，可直接被 scrape，也可供 node_exporter textfile 采集。
 
 零依赖实现（不引 prometheus_client）：输出 OpenMetrics/Prometheus text 格式，
 既能挂到常驻服务的 ``/metrics``，也能在批处理结束时写成文件供 node_exporter

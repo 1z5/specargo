@@ -1,17 +1,16 @@
-"""Python 常驻处理服务（JD 职责 3 的完整对应）。
+"""Python 常驻处理服务。
 
-JD 原文："维护现有 Python 常驻处理服务，完成接口适配、处理模块接入及运行问题修复，
-支持同步调用或异步任务处理，配合完成部署和版本升级。"
-要求 5："能够检查任务状态、日志、健康探针和资源配置，配合完成滚动升级及优雅停机。"
+要解决的四类问题：接口适配（处理模块可插拔接入）、同步/异步两种调用形态、
+运行时可观测（任务状态/日志/健康探针）、以及可被安全替换（滚动升级 + 优雅停机）。
 
-本模块用**标准库**实现一个生产形态的常驻服务，覆盖上述全部要点：
+本模块用**标准库**实现一个生产形态的常驻服务，覆盖这四类问题：
 
     GET  /healthz            存活探针：只探进程本身（事件循环是否卡死）
     GET  /readyz             就绪探针：探依赖（状态库/存储可达），失败即摘流量
     POST /tasks              提交异步任务 -> 返回 job_id（异步任务处理）
     POST /process            同步处理 -> 直接返回结果（同步调用）
     GET  /tasks/{job_id}     任务状态 + 进度（current/total）
-    POST /tasks/{job_id}/retry  失败任务重处理（JD 职责 2）
+    POST /tasks/{job_id}/retry  失败任务重处理
     GET  /tasks              任务列表 + 积压量
     GET  /metrics            Prometheus 指标
     GET  /version            版本信息（配合滚动升级/回滚）
@@ -54,7 +53,7 @@ VERSION = os.getenv("SERVICE_VERSION", "dev")
 
 
 # ---------------------------------------------------------------------------
-# 任务执行器：业务处理模块的接入点（JD："完成接口适配、处理模块接入"）
+# 任务执行器：业务处理模块的接入点
 # ---------------------------------------------------------------------------
 
 class Processor:
@@ -169,7 +168,7 @@ class Service:
                 return
             job.update(fields)
             job["updated_at"] = time.time()
-            # 状态登记到 item 表（任务记录，对应 JD 要求 4）
+            # 状态登记到 item 表（任务记录）
             if self.state is not None and connect:
                 try:
                     upsert_generic_item(
@@ -195,7 +194,7 @@ class Service:
                 + counts.get("generated", 0)}
 
     def retry(self, job_id: str) -> str:
-        """失败任务重处理：重置状态并重新入队（JD 职责 2）。"""
+        """失败任务重处理：重置状态并重新入队。"""
         job = self.get_job(job_id)
         if job is None:
             raise KeyError(job_id)
