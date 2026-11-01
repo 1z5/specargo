@@ -1,0 +1,74 @@
+name: unit-tests
+
+# 离线测试：不需要集群、不需要 API key、不需要 Docker。
+# 与 k8s-smoke 互补——smoke 验证集群编排，本 job 守护代码正确性
+#（此前 32+ 个用例只在本地手动跑，改坏 state.py 的 SQL 集群冒烟依然是绿的）。
+on:
+  push:
+    paths: ["app/**", "pipelines/**", "tests/**", ".github/workflows/unit-tests.yml"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 是常见生产下限；3.12 与 Dockerfile / Dockerfile.ci 保持一致
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 跑离线测试（三个套件）
+        run: |
+          set -e
+          total=0
+          for f in tests/test_framework.py tests/test_resume_state.py \
+                   tests/test_service_and_storage.py; do
+            echo "=========== $f ==========="
+            python3 "$f"
+          done
+
+      - name: 校验 pipeline 定义可加载（严格模式）
+        run: |
+          set -e
+          cd app
+          for f in ../pipelines/*.yaml; do
+            echo "--- $f ---"
+            python3 -c "
+          import sys
+          sys.path.insert(0, '.')
+          from spec import load_spec
+          s = load_spec('$f')
+          print(f'  ✓ {s.name}: {len(s.stages)} stages, {len(s.partitions)} partitions')
+          "
+          done
+
+      - name: runner dry-run（渲染全部命令，验证模板无未定义变量）
+        run: |
+          set -e
+          cd app
+          python3 runner.py ../pipelines/etl-demo.yaml --dry-run 2>&1 | head -20
+
+      - name: lint 全部 k8s 编排（schema 级校验）
+        run: |
+          set -e
+          ARGO_VERSION=v3.7.18
+          curl -sSL -o /tmp/argo.gz \
+            "https://github.com/argoproj/argo-workflows/releases/download/${ARGO_VERSION}/argo-linux-amd64.gz"
+          gunzip -f /tmp/argo.gz
+          chmod +x /tmp/argo
+          for f in k8s/*.yaml; do
+            # object-store / artifact-repository 是原生 K8s 资源，argo lint 不认识，跳过
+            case "$f" in
+              *object-store.yaml|*artifact-repository.yaml) continue ;;
+            esac
+            echo "--- $f ---"
+            /tmp/argo lint --offline "$f"
+          done
