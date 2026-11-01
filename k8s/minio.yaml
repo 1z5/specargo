@@ -1,0 +1,60 @@
+# MinIO：kind 集群内的 S3 兼容对象存储，作为 Argo 的 artifact repository。
+#
+# 为什么需要它：多节点集群下 hostPath / emptyDir 都是**节点本地**的——
+# extract 在 worker2 写的文件，transform 调度到 worker 上根本读不到
+# （这个失败在 CI 里真实出现过：transform/load 大量 exit code 1）。
+# 跨 Pod 传递数据的正确方式是对象存储或 RWX PVC，这里用 MinIO 验证前者。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argo-artifacts
+  namespace: argo
+stringData:
+  accesskey: minio
+  secretkey: minio12345
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: argo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: minio}
+  template:
+    metadata:
+      labels: {app: minio}
+    spec:
+      containers:
+      - name: minio
+        image: minio/minio:latest
+        command: ["/bin/sh", "-c"]
+        # 预建 bucket，避免 Argo 上传时 bucket 不存在
+        args:
+        - "mkdir -p /data/argo-artifacts && minio server /data --console-address :9001"
+        env:
+        - {name: MINIO_ROOT_USER, value: minio}
+        - {name: MINIO_ROOT_PASSWORD, value: minio12345}
+        - {name: MINIO_BROWSER, value: "off"}
+        ports:
+        - {containerPort: 9000, name: s3}
+        - {containerPort: 9001, name: console}
+        readinessProbe:
+          httpGet: {path: /minio/health/live, port: 9000}
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits: {cpu: 500m, memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: argo
+spec:
+  selector: {app: minio}
+  ports:
+  - {name: s3, port: 9000, targetPort: 9000}
+  - {name: console, port: 9001, targetPort: 9001}

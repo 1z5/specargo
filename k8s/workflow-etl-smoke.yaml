@@ -28,15 +28,11 @@ spec:
       value: '{{workflow.name}}'         # run_id 贯穿日志与产物路径
 
   volumes:
-  # kind 演练用 hostPath；多节点集群应换 ReadWriteMany PVC 或对象存储
-  - name: output
-    hostPath:
-      path: /tmp/ci/output
-      type: DirectoryOrCreate
+  # 输入用 ConfigMap：多节点下任何 Pod 都能读到（hostPath 是节点本地的，会读不到）
   - name: input
-    hostPath:
-      path: /tmp/ci/input
-      type: DirectoryOrCreate
+    configMap:
+      name: etl-input-partitions
+  # 产物不走共享卷：跨 Pod 数据一律经 artifact repository（MinIO）传递
 
   templates:
   # =====================================================================
@@ -63,7 +59,7 @@ spec:
 
       - name: transform
         template: transform
-        dependencies: [discover]
+        dependencies: [discover, extract]
         withParam: '{{tasks.discover.outputs.parameters.items}}'
         arguments:
           parameters:
@@ -71,10 +67,13 @@ spec:
             value: '{{item}}'
           - name: run-id
             value: '{{workflow.parameters.run-id}}'
+          artifacts:
+          - name: raw
+            from: '{{tasks.extract.outputs.artifacts.raw}}'
 
       - name: load
         template: load
-        dependencies: [discover]
+        dependencies: [discover, transform]
         withParam: '{{tasks.discover.outputs.parameters.items}}'
         arguments:
           parameters:
@@ -82,16 +81,22 @@ spec:
             value: '{{item}}'
           - name: run-id
             value: '{{workflow.parameters.run-id}}'
+          artifacts:
+          - name: clean
+            from: '{{tasks.transform.outputs.artifacts.clean}}'
 
       # ---- 质量闸门：在集群里跑真实的检查插件，不过检则 task 失败 ----
       - name: validate
         template: validate
-        dependencies: [discover]
+        dependencies: [discover, transform]
         withParam: '{{tasks.discover.outputs.parameters.items}}'
         arguments:
           parameters:
           - name: partition
             value: '{{item}}'
+          artifacts:
+          - name: clean
+            from: '{{tasks.transform.outputs.artifacts.clean}}'
 
   # =====================================================================
   # discover：扫描待处理分区（动态工作流的入口）
@@ -175,16 +180,17 @@ spec:
       - /app/etl_steps.py
       - extract
       - '--partition={{inputs.parameters.partition}}'
-      - '--out=/output/extract/{{inputs.parameters.partition}}.jsonl'
+      - '--out=/tmp/work/{{inputs.parameters.partition}}.jsonl'
       env:
       - name: TTS_RUN_ID
         value: '{{inputs.parameters.run-id}}'
-      volumeMounts:
-      - name: output
-        mountPath: /output
       resources:
         requests: {cpu: 100m, memory: 128Mi}
         limits: {cpu: 500m, memory: 256Mi}
+    outputs:
+      artifacts:
+      - name: raw
+        path: /tmp/work/{{inputs.parameters.partition}}.jsonl
 
   # =====================================================================
   # transform：数据问题不重试（limit 0），不过检即阻断
@@ -194,6 +200,10 @@ spec:
       parameters:
       - name: partition
       - name: run-id
+      artifacts:
+      # 从上游 extract 的 artifact 取数据（经 MinIO，与节点无关）
+      - name: raw
+        path: /tmp/in/raw.jsonl
     timeout: '5m'
     retryStrategy:
       limit: '0'
@@ -204,17 +214,18 @@ spec:
       args:
       - /app/etl_steps.py
       - transform
-      - '--in=/output/extract/{{inputs.parameters.partition}}.jsonl'
-      - '--out=/output/transform/{{inputs.parameters.partition}}.jsonl'
+      - '--in=/tmp/in/raw.jsonl'
+      - '--out=/tmp/work/{{inputs.parameters.partition}}.jsonl'
       env:
       - name: TTS_RUN_ID
         value: '{{inputs.parameters.run-id}}'
-      volumeMounts:
-      - name: output
-        mountPath: /output
       resources:
         requests: {cpu: 100m, memory: 128Mi}
         limits: {cpu: 500m, memory: 256Mi}
+    outputs:
+      artifacts:
+      - name: clean
+        path: /tmp/work/{{inputs.parameters.partition}}.jsonl
 
   # =====================================================================
   # load：写完成标记
@@ -224,6 +235,9 @@ spec:
       parameters:
       - name: partition
       - name: run-id
+      artifacts:
+      - name: clean
+        path: /tmp/in/clean.jsonl
     timeout: '5m'
     retryStrategy:
       limit: '2'
@@ -235,17 +249,18 @@ spec:
       args:
       - /app/etl_steps.py
       - load
-      - '--in=/output/transform/{{inputs.parameters.partition}}.jsonl'
-      - '--out=/output/load/{{inputs.parameters.partition}}.done'
+      - '--in=/tmp/in/clean.jsonl'
+      - '--out=/tmp/work/{{inputs.parameters.partition}}.done'
       env:
       - name: TTS_RUN_ID
         value: '{{inputs.parameters.run-id}}'
-      volumeMounts:
-      - name: output
-        mountPath: /output
       resources:
         requests: {cpu: 100m, memory: 128Mi}
         limits: {cpu: 500m, memory: 256Mi}
+    outputs:
+      artifacts:
+      - name: marker
+        path: /tmp/work/{{inputs.parameters.partition}}.done
 
   # =====================================================================
   # validate：集群里跑质量检查插件（数据质量自动化）
@@ -254,6 +269,9 @@ spec:
     inputs:
       parameters:
       - name: partition
+      artifacts:
+      - name: clean
+        path: /tmp/in/clean.jsonl
     timeout: '2m'
     retryStrategy:
       limit: '0'                        # 检查失败是数据问题，重试无意义
@@ -268,7 +286,7 @@ spec:
         from pathlib import Path
         from checks import run_check
 
-        artifact = Path("/output/transform/{{inputs.parameters.partition}}.jsonl")
+        artifact = Path("/tmp/in/clean.jsonl")
         result = run_check("row_count", artifact, {"expect": 50}, {})
         print(f"[validate] partition={{inputs.parameters.partition}} "
               f"passed={result.passed} metric={result.metric} {result.detail}")
@@ -294,14 +312,17 @@ spec:
         import time
         from pathlib import Path
 
-        out = Path("/output")
+        out = Path("/tmp/work")
         out.mkdir(parents=True, exist_ok=True)
-        marker = out / f"run-{os.environ.get('TTS_RUN_ID', 'unknown')}.done"
-        marker.write_text(f"finished at {time.time()}\n", encoding="utf-8")
+        marker = out / "run.done"
+        marker.write_text(
+            f"run_id={os.environ.get('TTS_RUN_ID', 'unknown')} "
+            f"finished_at={time.time()}\n", encoding="utf-8")
         print(f"[onExit] 收口完成 -> {marker}")
       env:
       - name: TTS_RUN_ID
         value: '{{workflow.parameters.run-id}}'
-      volumeMounts:
-      - name: output
-        mountPath: /output
+    outputs:
+      artifacts:
+      - name: run-marker
+        path: /tmp/work/run.done

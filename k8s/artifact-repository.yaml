@@ -1,0 +1,21 @@
+# Argo 的 artifact repository 配置：让 workflow 的 artifacts 走 MinIO（S3 兼容）。
+#
+# Argo v3.x 通过 argo namespace 下名为 artifact-repositories 的 ConfigMap 配置，
+# key 是仓库名（default 为默认仓库）。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: artifact-repositories
+  namespace: argo
+data:
+  default: |
+    s3:
+      bucket: argo-artifacts
+      endpoint: minio.argo.svc.cluster.local:9000
+      insecure: true                 # 集群内 HTTP，不走 TLS
+      accessKeySecret:
+        name: argo-artifacts
+        key: accesskey
+      secretKeySecret:
+        name: argo-artifacts
+        key: secretkey
