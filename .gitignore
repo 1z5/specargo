@@ -6,3 +6,4 @@ verify_report/
 *.db
 *.db-wal
 *.db-shm
+*.prom

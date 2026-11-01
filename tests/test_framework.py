@@ -416,6 +416,86 @@ def test_compile_is_deterministic():
     assert a == b
 
 
+# ===================== 真实 pipeline 的回归防线 =====================
+# 这几条是为了防住"CI 绿但旗舰 pipeline 跑不通"这类回归：
+# 之前的 bug 是 YAML 声明了 app_dir: "" 而 Runner 用 setdefault 注入不覆盖，
+# 导致渲染出 `python3 /etl_steps.py`，但当时没有任何测试真跑过真实 pipeline。
+
+def test_runner_overrides_empty_injected_params():
+    """Runner 必须覆盖 YAML 里声明的空占位（app_dir/run_id），不能用 setdefault。"""
+    from runner import Runner
+
+    spec = _load_etl_spec()
+    # 前置：YAML 确实声明了空串占位（这是 bug 的触发条件）
+    assert spec.params.get("app_dir") == "", spec.params
+    assert spec.params.get("run_id") == "", spec.params
+
+    Runner(spec, verbose=False)
+
+    assert spec.params["app_dir"], "app_dir 未被注入（渲染会得到 /etl_steps.py）"
+    assert Path(spec.params["app_dir"]).is_dir(), spec.params["app_dir"]
+    assert spec.params["run_id"], "run_id 未被注入（状态表追溯会失效）"
+
+
+def test_real_pipeline_commands_render_without_empty_paths():
+    """真实 pipeline 的每条命令渲染后，不能出现空路径/未解析变量。"""
+    from runner import Runner
+    from spec import build_context, render
+
+    spec = _load_etl_spec()
+    Runner(spec, verbose=False)
+    part = spec.partitions[0]
+    ctx = build_context(spec, part, spec.params)
+
+    for stage in spec.stages:
+        cmd = render(stage.command, ctx)
+        assert "{{" not in cmd, (stage.name, cmd)
+        # 命令里出现的 .py 脚本路径必须真实存在：
+        # app_dir 为空时会渲染成 `/etl_steps.py`（根目录），该文件不存在
+        import re
+        for script in re.findall(r"(\S+\.py)", cmd):
+            assert Path(script).is_file(), (stage.name, f"脚本路径不存在: {script}", cmd)
+
+
+def test_real_pipeline_runs_end_to_end_green():
+    """端到端：真正执行 pipelines/etl-demo.yaml，必须对账全绿。
+
+    这是最重要的一条——它把"旗舰 demo 能跑"变成 CI 断言。
+    """
+    from runner import Runner
+    from state import connect, reconcile_generic
+
+    with tempfile.TemporaryDirectory() as d:
+        work = Path(d)
+        db = work / "state.db"
+        spec = _load_etl_spec()
+        result = Runner(spec, state_db=str(db), workdir=work, verbose=False).run()
+        assert result.ok, [(r.stage, r.status, r.detail[:120]) for r in result.runs]
+
+        conn = connect(db)
+        recon = reconcile_generic(
+            conn, "dwd_order",
+            [(p.dataset, p.key, p.variant) for p in spec.partitions],
+            final_stage=spec.stages[-1].name,
+        )
+        assert recon["ok"], recon
+        assert recon["expected"] == 3 and recon["verified"] == 3, recon
+        conn.close()
+
+
+def test_compile_workflow_uses_spec_name():
+    """编译产物的 workflow 名必须是 spec.name（曾因循环变量遮蔽变成 consumed artifact 名）。"""
+    from spec2argo import compile_workflow
+
+    spec = _load_etl_spec()
+    wf = compile_workflow(spec)
+    assert wf["metadata"]["name"] == spec.name == "etl-demo", wf["metadata"]["name"]
+
+    # 显式传 name 必须生效（不被内部循环变量覆盖）
+    wf2 = compile_workflow(spec, name="custom-name")
+    assert wf2["metadata"]["name"] == "custom-name", wf2["metadata"]["name"]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

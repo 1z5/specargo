@@ -67,9 +67,19 @@ class Runner:
         self.reconcile_ok = True
         # 代码目录与工作目录分离：workdir 放产物，app_dir 放代码
         # （容器里两者通常都是 /app；本地演练时 workdir 常是临时目录）
-        spec.params.setdefault("app_dir", str(Path(__file__).resolve().parent))
+        #
+        # ⚠️ 注意：这里不能用 dict.setdefault —— YAML 为了通过严格模板校验会把
+        # app_dir / run_id 显式声明成空串占位（键已存在），setdefault 不会覆盖，
+        # 结果渲染出 "/etl_steps.py"（app_dir 为空）这类路径错误。
+        # 因此语义应是"值为假时覆盖"，而不是"键缺失时填充"。
+        if not spec.params.get("app_dir"):
+            spec.params["app_dir"] = str(Path(__file__).resolve().parent)
         # run_id 由 Runner 注入：YAML 里只声明不赋值，避免两份定义漂移
-        spec.params.setdefault("run_id", self.run_id)
+        if not spec.params.get("run_id"):
+            spec.params["run_id"] = self.run_id
+        # 加固：work_dir 若为空串同样给默认值（不影响 YAML 里显式声明的值）
+        if not spec.params.get("work_dir"):
+            spec.params["work_dir"] = "out"
 
     # ------------------------------------------------------------------
     def _log(self, msg: str) -> None:

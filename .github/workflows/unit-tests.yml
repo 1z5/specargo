@@ -67,11 +67,30 @@ jobs:
           "
           done
 
-      - name: runner dry-run（渲染全部命令，验证模板无未定义变量）
+      - name: runner 真跑一次真实 pipeline（不能只 dry-run）
         run: |
           set -e
           cd app
-          python3 runner.py ../pipelines/etl-demo.yaml --dry-run 2>&1 | head -20
+          rm -rf /tmp/ci-run && mkdir -p /tmp/ci-run
+          python3 runner.py ../pipelines/etl-demo.yaml \
+            --state-db /tmp/ci-run/s.db --workdir /tmp/ci-run | tee /tmp/ci-run/out.txt
+          # 对账必须全绿（曾出现"CI 绿但本地 pipeline 跑不通"的回归：
+          # YAML 声明 app_dir: "" 而 Runner 用 setdefault 不覆盖 -> 渲染出 /etl_steps.py）
+          grep -q "'ok': True" /tmp/ci-run/out.txt \
+            || { echo "❌ pipeline 对账未通过"; exit 1; }
+
+      - name: 断言渲染结果无空路径
+        run: |
+          set -e
+          cd app
+          OUT=$(python3 runner.py ../pipelines/etl-demo.yaml --dry-run 2>&1)
+          echo "$OUT" | head -6
+          # app_dir 为空时命令会变成 `python3 /etl_steps.py`（根目录），必须拦住
+          if echo "$OUT" | grep -qE "python3 /[a-z_]+\.py"; then
+            echo "❌ 命令里出现根目录脚本路径，app_dir 未注入"
+            exit 1
+          fi
+          echo "✅ 渲染路径正常"
 
       - name: 编译 pipeline 定义成 Argo CRD（spec2argo）
         run: |

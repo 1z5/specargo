@@ -205,9 +205,11 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
     for stage in spec.stages:
         # 本 stage 显式声明消费的上游 artifact（路径用上游的声明，保证 key 一致）
         consumed = []
-        for name in stage.consumes:
-            if name in produced_by and produced_by[name] != stage.name:
-                consumed.append((name, artifact_paths[name]))
+        # 注意：循环变量不能叫 name，否则会遮蔽本函数的 name 参数，
+        # 导致 workflow metadata.name 取到最后一个 consumed artifact 名。
+        for art_name in stage.consumes:
+            if art_name in produced_by and produced_by[art_name] != stage.name:
+                consumed.append((art_name, artifact_paths[art_name]))
 
         parts = []
         get_snip = _objstore_get_snippet(dict(consumed))

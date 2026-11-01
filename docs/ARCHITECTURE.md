@@ -133,15 +133,18 @@ SIGTERM → begin_drain()（/readyz 立刻 503）
         → checkpoint → 停止 accept → 退出
 ```
 
-### 3.3 集群流（Argo，见 `k8s/workflow-etl-smoke.yaml`）
+### 3.3 集群流（Argo，CI 提交的是 `spec2argo` 编译产物）
 
 ```
-discover（扫描 ConfigMap 输入 → 输出 JSON 数组）
-  └─► extract / transform / load / validate
-        各自 withParam 引用 discover 输出做动态扇出
+pipelines/etl-demo.yaml ──spec2argo──► Workflow CRD ──► argo submit
+  └─► discover（读 ConfigMap 输入 → 输出 JSON 数组）
+        └─► extract / transform / load（各自 withParam 引用 discover 输出做动态扇出）
+              └─► gate-<stage>（跑 checks.py 插件，不过检即失败）
         跨 Pod 数据经对象存储路径契约传递（objstore.py）
-        onExit 上传 run.done 收口
 ```
+
+> 手写版 `k8s/workflow-etl-smoke.yaml` 是早期实现（含 `onExit` 收口），
+> 已降级为对照参考；编译产物目前尚未生成 `onExit`（见 `docs/ROADMAP.md`）。
 
 ---
 
@@ -159,10 +162,10 @@ discover（扫描 ConfigMap 输入 → 输出 JSON 数组）
 | `metrics.METRICS` | controller 指标 + 自定义指标 |
 | `service.py` 的探针与停机 | liveness / readiness / startup + preStop + terminationGracePeriod |
 
-> **尚未实现**：把 `PipelineSpec` 编译成 Argo CRD 的 `spec2argo` 编译器。
-> 目前本地 runner 与集群 workflow 是两份定义（`pipelines/etl-demo.yaml` 与
-> `k8s/workflow-etl-smoke.yaml`），存在漂移风险——这是已记录在
-> `docs/ROADMAP.md` 的下一步。
+> **已实现**：把 `PipelineSpec` 编译成 Argo CRD 的 `spec2argo` 编译器
+> （`app/spec2argo.py`，CI 提交编译产物跑集群）。覆盖范围 container 命令 +
+> checks + artifacts，未覆盖 script 型 template、synchronization、suspend；
+> 详见 `docs/ROADMAP.md`。
 
 ---
 

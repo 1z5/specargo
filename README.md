@@ -1,7 +1,7 @@
 # tts-pipeline-argo
 
 ![unit-tests](https://github.com/1z5/tts-pipeline-argo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：40 个离线用例，Python 3.11 + 3.12 -->
+<!-- unit-tests：50 个离线用例，Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/tts-pipeline-argo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一条完整的数据管线案例：批量生成 → 独立回检 → 失败修复 → 对账收口，用 Argo Workflows 编排。**
@@ -10,9 +10,10 @@
 与 Prometheus 指标——覆盖任务调度、断点续跑、质量校验、状态登记到可观测告警的完整链路。
 批处理侧与常驻服务侧共享同一套可靠性语义。
 
-> **边界（说清楚，不含糊）**：本地 runner 与集群 workflow 目前是**两份定义**，
-> `spec → Argo CRD` 的编译器还没写，存在漂移风险。这是已列入
-> [`docs/ROADMAP.md`](docs/ROADMAP.md) 的下一步，不是已完成能力。
+> **边界（说清楚，不含糊）**：`spec → Argo CRD` 的编译器已落地
+> （`app/spec2argo.py`，CI 提交编译产物跑集群），但只覆盖 container 命令 +
+> checks + artifacts 子集；script 型 template、synchronization、suspend 尚未映射，
+> 仍有覆盖缺口——见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
 
 设计来自我在内容生产团队做批量 TTS 管线的真实经验，重构为可复现的开源参考实现：
 把"跑完"变成"跑对"——任务编排、断点续跑、幂等、质量校验、对账、告警六个环节都有代码。
@@ -48,7 +49,7 @@
 | **状态与追溯** | `state.py` item 级状态表（dataset/partition/variant/stage 四元组主键）、run_id 全程贯穿日志与产物 |
 | **可观测性** | `metrics.py` Prometheus text 格式指标（执行数/耗时分布/进度/积压/对账缺失/inflight）、`notify.py` onExit 收口告警 |
 | **存储抽象** | `artifacts.py` 对象存储契约 + 本地目录 / S3 兼容双实现，key 目录穿越防护，digest 用于变更检测 |
-| **容器与编排** | `Dockerfile` + `k8s/workflow.yaml` / `cronworkflow.yaml`；CI 内在 kind + Argo Workflows v3.7.18 上实测跑通（12/12 task + onExit） |
+| **容器与编排** | `Dockerfile` + `k8s/workflow.yaml` / `cronworkflow.yaml`；CI 在 kind + Argo Workflows v3.7.18 上实测跑通（31/31 Pod：1 discover + 6 × 5 分区 = 3 阶段 + 3 质量闸门）；提交的是 spec2argo 编译产物，暂无 onExit |
 | **多模态处理** | TTS/ASR 链路（音频批量生成 + 回检），`docs/VERIFICATION.md` 记录了模型静默截断这类无告警故障的定位方法 |
 | **成本与效率** | 并发与重试参数化、输入指纹避免重复计算、`--force` 受控大批量重处理、YAML 内 requests/limits 与节点池隔离 |
 
@@ -68,7 +69,7 @@ python verify_audio.py output/book_a --min-accuracy 0.90
 # 对账：expected vs actual，漏数/未过检/重复 → 非零退出码
 python summary.py --state-db state.db --books books/book_a.json --voice cedar
 
-# 测试（40 个用例，不需要 API key 与集群；CI 双 Python 版本自动跑）
+# 测试（50 个用例，不需要 API key 与集群；CI 双 Python 版本自动跑）
 cd .. && python3 tests/test_framework.py && python3 tests/test_service_and_storage.py
 
 # 本地 lint Argo YAML（离线，无需集群）
@@ -150,14 +151,17 @@ python3 runner.py ../pipelines/etl-demo.yaml --state-db state.db --workdir /tmp/
 
 ## 已验证 / 未验证
 
-**已验证（40 个离线测试 + 集群 E2E）**：
-- 框架 17 例：resume 跳过、依赖阻断、重试成功、四类检查、对账抓漏（含多 variant 假绿回归）、
-  严格模板校验、attempt 计数语义
-- 服务/存储/指标 11 例：**真实起服务进程**验证探针、异步任务全生命周期、同步调用、
-  `/metrics`、SIGTERM 后 `/readyz` 先返 503 再退出（退出码 0）、retry 用原始 payload、
-  objstore 本地模式往返与 CLI 退出码
-- 存储 4 例：目录/文件往返、目录穿越拒绝、digest 稳定、工厂分发
-- 原有 10 例：指纹跳过、输入变化、对账、幂等写入、重复检测
+**已验证（50 个离线测试 + 集群 E2E）**：
+- 框架 `tests/test_framework.py` 25 例：spec 解析与严格渲染校验、四类通用检查、
+  runner 断点跳过/依赖阻断/重试/attempt 计数、对账按 variant 分组抓假绿、
+  `spec2argo` 编译产物结构/确定性/gate/discover 输出
+- 断点续跑与状态 `tests/test_resume_state.py` 9 例：指纹跳过与输入变化、
+  输出缺失重生成、item 状态幂等 upsert、对账漏生成/未过检、重复文件与内容重复检测
+- 服务/存储/指标 `tests/test_service_and_storage.py` 12 例：**真实起服务进程**验证探针、
+  异步任务全生命周期、暂停期拒新任务、SIGTERM 优雅退出（退出码 0）、retry 用原始 payload；
+  metrics 格式与原子落盘；objstore 本地/目录往返、目录穿越拒绝、CLI 退出码
+- **P0 回归断言（4 例）**：本地真实 pipeline 端到端跑绿、渲染命令无空路径、
+  runner 注入参数空值覆盖、编译产物 workflow 名正确
 - E2E：ETL 管线 9 verified / 二次跑 9 resume-skipped / 指标文件内容正确 / 服务冒烟含优雅停机
 
 **已在真实集群跑通（kind 多节点 + Argo Workflows v3.7.18，CI 每次 push 自动验证）**：
@@ -183,7 +187,7 @@ Pod 分布到的节点数: 2
 | **质量闸门** | 每个 stage 后跟一个 `gate-<stage>` 任务，在集群里跑 `checks.py` 插件 | 不过检则 task 失败（`limit: 0` 不重试） |
 | **一份定义两个目标** | `spec2argo` 把 `pipelines/etl-demo.yaml` 编译成 Argo CRD，CI 提交编译产物 | 本地 runner 与集群不再各写一份 |
 | **重试分层** | extract/load `OnTransientError`，transform/validate `limit: 0` | 语义按失败类型区分 |
-| **onExit 收口** | 无论成败都上传 `run.done` | 收口对象在 bucket 内 |
+| **onExit 收口** | 手写版 `k8s/workflow-etl-smoke.yaml` 无论成败都上传 `run.done` | 收口对象在 bucket 内；编译产物尚未生成 onExit（见 `docs/ROADMAP.md`） |
 
 ```bash
 # 本地 lint（离线，无需集群）
@@ -228,6 +232,7 @@ app/            应用代码
   metrics.py      Prometheus 指标（Counter/Gauge/Histogram + textfile 输出）
   spec.py         声明式管线定义（YAML → Stage/Partition/RetryPolicy）
   runner.py       通用 stage 执行器（断点续跑/依赖/重试/超时/对账）
+  spec2argo.py    编译器：PipelineSpec → Argo Workflow CRD（CI 提交编译产物）
   checks.py       质量检查插件注册表 + 4 个通用检查
   checks_tts.py   TTS 领域检查（ASR 三态判定，插件方式注入）
   etl_steps.py    ETL demo 的三个步骤（证明框架普适性）
@@ -242,7 +247,7 @@ app/            应用代码
   tts_verify/     校验核心包
 pipelines/      声明式管线定义（tts.yaml / etl-demo.yaml）
 k8s/            Argo 编排（Workflow / CronWorkflow）
-tests/          离线测试（23 个用例：框架 + 断点续跑 + 对账）
+tests/          离线测试（50 个用例：框架 / 断点续跑与状态 / 服务·存储·指标）
 docs/           架构、校验机制、ROADMAP（下一步计划）
 ```
 
