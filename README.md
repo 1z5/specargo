@@ -1,6 +1,7 @@
 # tts-pipeline-argo
 
 ![unit-tests](https://github.com/1z5/tts-pipeline-argo/actions/workflows/unit-tests.yml/badge.svg)
+<!-- unit-tests：40 个离线用例，Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/tts-pipeline-argo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一条完整的数据管线案例：批量生成 → 独立回检 → 失败修复 → 对账收口，用 Argo Workflows 编排。**
@@ -167,7 +168,7 @@ Pod 节点成功数: 21/21              # 1 discover + 4 阶段 × 5 分区
 discover 发现并扇出的分区数: 5
 工作流 Pod 总数: 21
 Pod 分布到的节点数: 2              # 9 个在 worker、12 个在 worker2
-对象存储中的 artifact 对象数: 16   # 5 raw + 5 clean + 5 marker + 1 run.done
+对象存储中的 artifact 对象数: 15   # 5 分区 × (raw + clean + marker)
 ```
 
 集群拓扑与验证点：
