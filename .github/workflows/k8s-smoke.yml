@@ -56,11 +56,10 @@ jobs:
         run: |
           set -e
           ARGO_VERSION=v3.7.18
-          curl -sSL -o /tmp/argo \
-            "https://github.com/argoproj/argo-workflows/releases/download/${ARGO_VERSION}/argo-linux-amd64" \
-            || curl -sSL -o /tmp/argo.gz \
+          # 注意：release 资源名是 argo-linux-amd64.gz（压缩包），不是 argo-linux-amd64
+          curl -sSL -o /tmp/argo.gz \
             "https://github.com/argoproj/argo-workflows/releases/download/${ARGO_VERSION}/argo-linux-amd64.gz"
-          [ -f /tmp/argo.gz ] && gunzip -f /tmp/argo.gz && mv /tmp/argo /tmp/argo 2>/dev/null || true
+          gunzip -f /tmp/argo.gz            # 得到 /tmp/argo
           chmod +x /tmp/argo
           /tmp/argo version
           /tmp/argo lint -n argo k8s/workflow-etl-smoke.yaml
