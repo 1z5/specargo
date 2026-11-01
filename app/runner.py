@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from checks import CheckResult, run_check
+from metrics import METRICS
 from spec import Partition, PipelineSpec, build_context, parse_duration, render
 from state import (FAILED, GENERATED, VERIFIED, close_run, connect, get_item,
                    open_run, reconcile_generic, upsert_generic_item)
@@ -160,11 +161,15 @@ class Runner:
                     self.result.runs.append(StageRun(stage.name, tag, "skipped"))
                     continue
 
-                ok, out = self._execute(stage, partition)
+                METRICS.inflight.inc(1, stage=stage.name)
+                with METRICS.stage_duration.time(stage=stage.name):
+                    ok, out = self._execute(stage, partition)
+                METRICS.inflight.inc(-1, stage=stage.name)
                 attempts = 0
                 if not ok:
                     self._log(f"      执行失败: {out.strip()[:200]}")
                     self._register(stage, partition, FAILED, attempts)
+                    METRICS.stage_runs.inc(1, stage=stage.name, status=FAILED)
                     self.result.runs.append(StageRun(stage.name, tag, FAILED, attempts, detail=out))
                     continue
 
@@ -184,6 +189,10 @@ class Runner:
 
                 status = VERIFIED if check_results else GENERATED
                 self._register(stage, partition, status, attempts)
+                METRICS.stage_runs.inc(1, stage=stage.name, status=status)
+                for name, r in check_results:
+                    METRICS.check_results.inc(1, check=name,
+                                              result="pass" if r.passed else "fail")
                 self.result.runs.append(
                     StageRun(stage.name, tag, status, attempts, check_results))
 
@@ -259,6 +268,11 @@ class Runner:
             ]
             for recon in recons:
                 self._log(f"对账: {recon}")
+                METRICS.reconcile_missing.set(len(recon["missing"]), dataset=recon["dataset"])
+                METRICS.reconcile_not_verified.set(len(recon["not_verified"]),
+                                                   dataset=recon["dataset"])
+                METRICS.backlog.set(len(recon["missing"]) + len(recon["not_verified"]),
+                                    stage=final_stage or "final")
             overall_ok = all(r["ok"] for r in recons)
             self.reconcile_ok = self.reconcile_ok and overall_ok
             close_run(self.state, self.run_id,
@@ -267,6 +281,14 @@ class Runner:
                           f"{r['dataset']}: missing={len(r['missing'])} "
                           f"not_verified={len(r['not_verified'])}" for r in recons))
             self.state.close()
+
+        # 指标落盘（供 Prometheus textfile collector 采集；本地演练可直接看）
+        metrics_file = self.workdir / "metrics.prom"
+        try:
+            METRICS.write_file(metrics_file)
+            self._log(f"指标: {metrics_file}")
+        except Exception as exc:
+            self._log(f"指标写入失败: {exc}")
 
         # Argo 输出参数：让编排层拿到业务结果
         try:
