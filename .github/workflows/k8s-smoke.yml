@@ -62,21 +62,14 @@ jobs:
 
       # ---- 2. 部署 MinIO（S3 兼容对象存储）并配置 Argo artifact repository ----
       # 多节点集群下 hostPath / emptyDir 是节点本地的，跨 Pod 传数据必须走对象存储
-      # 预拉取 MinIO 镜像并加载进所有 kind 节点（确定性强，避免逐节点拉取失败）
-      - name: 预拉取 MinIO 镜像
+      # 对象存储与 artifact repository（复用已加载的 tts-argo:ci 镜像，无外部依赖）
+      - name: 部署对象存储与 artifact repository
         run: |
           set -e
-          docker pull quay.io/minio/minio:latest
-          kind load docker-image quay.io/minio/minio:latest --name tts-argo
-          echo "--- MinIO 镜像已加载到所有节点 ---"
-
-      - name: 部署 MinIO 与 artifact repository
-        run: |
-          set -e
-          kubectl apply -f k8s/minio.yaml
+          kubectl apply -f k8s/object-store.yaml
           kubectl apply -f k8s/artifact-repository.yaml
-          kubectl rollout status deployment/minio -n argo --timeout=180s
-          kubectl get pods -n argo -l app=minio
+          kubectl rollout status deployment/object-store -n argo --timeout=180s
+          kubectl get pods -n argo -l app=object-store
           echo "--- artifact repository 配置 ---"
           kubectl get configmap artifact-repositories -n argo -o yaml | grep -A4 "s3:"
 
@@ -179,10 +172,20 @@ jobs:
 
           # 对象存储：MinIO bucket 里必须有 artifact 落盘（证明跨 Pod 数据真走了 S3）
           echo "--- 对象存储 artifact 验证 ---"
-          POD=$(kubectl get pods -n argo -l app=minio -o jsonpath='{.items[0].metadata.name}')
-          KEYS=$(kubectl exec -n argo "$POD" -- sh -c \
-                 'find /data/argo-artifacts -type f | wc -l' 2>/dev/null || echo 0)
-          echo "MinIO 中的 artifact 文件数: $KEYS"
+          POD=$(kubectl get pods -n argo -l app=object-store -o jsonpath='{.items[0].metadata.name}')
+          # moto 的 S3 数据在进程内存里，用 S3 API 列举 bucket 内的对象数
+          KEYS=$(kubectl exec -n argo "$POD" -- python3 -c "
+          import boto3
+          s3 = boto3.client('s3', endpoint_url='http://127.0.0.1:5000',
+                            aws_access_key_id='test-access-key',
+                            aws_secret_access_key='test-secret-key')
+          total = 0
+          for b in s3.list_buckets().get('Buckets', []):
+              r = s3.list_objects_v2(Bucket=b['Name'])
+              total += r.get('KeyCount', 0)
+          print(total)
+          " 2>/dev/null || echo 0)
+          echo "对象存储中的 artifact 对象数: $KEYS"
           [ "$KEYS" -gt 0 ] || { echo "❌ artifact 未写入对象存储"; exit 1; }
 
           echo "✅ 集群冒烟通过：动态 DAG + 跨节点调度 + 对象存储 artifact + 质量闸门全部验证"

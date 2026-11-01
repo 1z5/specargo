@@ -1,8 +1,16 @@
-# CI 专用轻量镜像：只含 app/ 代码（纯标准库，无需 openai/faster-whisper）
-# 目的：让 kind 冒烟测试的构建时间从几分钟降到几秒
+# CI 专用镜像：包含 app/ 代码（纯标准库）+ S3 兼容对象存储服务端。
+#
+# 为什么把对象存储做进镜像：集群冒烟测试需要一个 S3 兼容端点来验证
+# Argo 的 artifact 传递链路。依赖外部镜像（Docker Hub / Quay）会引入
+# 拉取失败的不确定性，所以用 pip 装的 moto server 自建端点——
+# 验证的是 Argo 侧的 artifact 机制，与生产用 MinIO/OSS/S3 走同一套 S3 API。
 FROM python:3.12-slim
 
 WORKDIR /app
+
+# moto[server] 提供 S3 兼容的 HTTP 服务端（moto_server，默认端口 5000）
+RUN pip install --no-cache-dir "moto[server]"
+
 COPY app/ /app/
 
 ENV PYTHONUNBUFFERED=1 \

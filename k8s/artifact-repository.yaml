@@ -11,7 +11,7 @@ data:
   default: |
     s3:
       bucket: argo-artifacts
-      endpoint: minio.argo.svc.cluster.local:9000
+      endpoint: object-store.argo.svc.cluster.local:5000
       insecure: true                 # 集群内 HTTP，不走 TLS
       accessKeySecret:
         name: argo-artifacts

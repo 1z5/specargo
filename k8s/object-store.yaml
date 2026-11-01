@@ -1,0 +1,57 @@
+# 集群内的 S3 兼容对象存储：作为 Argo 的 artifact repository。
+#
+# 为什么需要它：多节点集群下 hostPath / emptyDir 是**节点本地**的——
+# extract 在 worker2 写的文件，transform 调度到 worker 上根本读不到
+# （这个失败在 CI 里真实出现过：transform/load 大量 exit code 1）。
+# 跨 Pod 传递数据的正确方式是对象存储或 RWX PVC，这里验证前者。
+#
+# 实现选择：用 moto server（S3 兼容）而不是外部 MinIO 镜像，
+# 以避免 CI 依赖外部 registry 的可用性。生产环境把 endpoint 换成
+# MinIO / 阿里云 OSS / AWS S3 即可，Argo 侧配置不变。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argo-artifacts
+  namespace: argo
+stringData:
+  accesskey: test-access-key
+  secretkey: test-secret-key
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: object-store
+  namespace: argo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: object-store}
+  template:
+    metadata:
+      labels: {app: object-store}
+    spec:
+      containers:
+      - name: moto
+        image: tts-argo:ci
+        imagePullPolicy: Never            # kind load 进去的本地镜像
+        command: [moto_server]
+        args: ["-p", "5000"]
+        ports:
+        - {containerPort: 5000, name: s3}
+        readinessProbe:
+          httpGet: {path: /, port: 5000}
+          initialDelaySeconds: 3
+          periodSeconds: 3
+        resources:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits: {cpu: 500m, memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: object-store
+  namespace: argo
+spec:
+  selector: {app: object-store}
+  ports:
+  - {name: s3, port: 5000, targetPort: 5000}
