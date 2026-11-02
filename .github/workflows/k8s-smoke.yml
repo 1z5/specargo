@@ -186,10 +186,21 @@ jobs:
           wf = json.load(sys.stdin)
           nodes = [n for n in wf['status']['nodes'].values()
                    if n.get('templateName') == 'on-exit']
-          print(f'{sum(1 for n in nodes if n["phase"] == "Succeeded")}/{len(nodes)}')
+          ok = sum(1 for n in nodes if n.get('phase') == 'Succeeded')
+          print('{}/{}'.format(ok, len(nodes)))
           ")
           echo "onExit 节点成功数: $ONEXIT"
           [ "$ONEXIT" = "1/1" ] || { echo "❌ onExit 未成功: $ONEXIT"; exit 1; }
+
+          # onExit 必须真的执行了对账（而不是空跑）：日志里要有 PASS 报告
+          ONEXIT_POD=$(kubectl get pods -n argo \
+                       -l workflows.argoproj.io/workflow=etl-demo-journal \
+                       -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+                       | grep 'on-exit' | head -1)
+          echo "onExit Pod: $ONEXIT_POD"
+          kubectl logs -n argo "$ONEXIT_POD" | tee /tmp/evidence-onexit.log
+          grep -q "对账结果: PASS" /tmp/evidence-onexit.log \
+            || { echo "❌ onExit 没有输出对账 PASS（可能跳过了对账）"; exit 1; }
 
           # 状态日志与分区清单必须真实落盘（证明跨 Pod 状态登记生效）
           PARTS=$(/tmp/argo get -n argo etl-demo-journal -o json | python3 -c "
@@ -224,6 +235,7 @@ jobs:
           /tmp/argo get -n argo etl-demo -o yaml > /tmp/evidence/workflow-etl-demo.yaml 2>&1
           /tmp/argo get -n argo etl-demo-journal -o yaml > /tmp/evidence/workflow-etl-demo-journal.yaml 2>&1
           kubectl get pods -n argo -o wide | tee /tmp/evidence/pods.txt
+          cp /tmp/evidence-onexit.log /tmp/evidence/onexit-log.txt 2>/dev/null || true
           kubectl get events -n argo --sort-by=.lastTimestamp | tail -40 \
             | tee /tmp/evidence/events.txt
           echo "--- 对象存储中的 artifact（路径契约产物）---"
