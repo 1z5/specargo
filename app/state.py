@@ -182,19 +182,18 @@ def items_for(conn: sqlite3.Connection, dataset: str,
 # 对账：expected vs actual（expected 由管线定义给出，不由框架推导领域数据）
 # ---------------------------------------------------------------------------
 
-def reconcile_generic(conn, dataset: str, expected, final_stage: str | None = None,
-                      terminal_statuses: Sequence[str] = (VERIFIED,)) -> dict:
-    """对账：expected 是 (dataset, partition, variant) 三元组列表。
+def evaluate_items(dataset: str, expected, rows, final_stage: str | None = None,
+                   terminal_statuses: Sequence[str] = (VERIFIED,)) -> dict:
+    """纯函数对账：expected 与已登记 rows 比对（不依赖存储后端）。
 
-    ``final_stage``：只按最后一个 stage 判定是否交付（多 stage 管线的正确语义：
-    中间 stage 成功不代表整条管线成功）。
-    ``terminal_statuses``：末 stage 的"可交付终态"。有质量闸门的 stage 只认
-    ``verified``；没有配置 checks 的 stage 由 Runner 传入 ``generated`` 也算交付
-    ——否则"不配质量闸门"的管线永远无法通过，等于框架隐性强制每个 stage 都要 checks。
+    本地 SQLite 与集群对象存储状态日志共用这一份判定逻辑——否则两个执行目标
+    的"什么算交付"会各写一遍，迟早漂移。
 
-    ⚠️ variant 必须参与对账：同一内容多 variant 的管线，若按 (dataset, stage)
-    聚合，A variant 缺的条目会被 B variant 的记录掩盖 → 假绿。
-    这里按 (dataset, variant) 分组分别对账，再合并结论。
+    - ``expected``: (dataset, partition, variant) 三元组列表
+    - ``rows``: 可迭代的 item 记录（dict 或 sqlite3.Row，需有
+      dataset/partition/variant/stage/status 字段）
+    - ``final_stage``: 只按末 stage 判定交付；None 表示不过滤
+    - ``terminal_statuses``: 末 stage 的可交付终态（有闸门只认 verified）
     """
     terminal = tuple(terminal_statuses) or (VERIFIED,)
     groups: dict[str, dict] = {}
@@ -204,25 +203,24 @@ def reconcile_generic(conn, dataset: str, expected, final_stage: str | None = No
         g = groups.setdefault(variant, {"expected": []})
         g["expected"].append(key)
 
-    # 一次性取回该 dataset 的所有行，按 variant 分组（避免 N 次查询）
-    all_rows = conn.execute(
-        "SELECT * FROM pipeline_item WHERE dataset=?", (dataset,)).fetchall()
     by_variant: dict[str, dict] = {}
-    for r in all_rows:
-        if final_stage and r["stage"] != final_stage:
+    for row in rows:
+        if row["dataset"] != dataset:
             continue
-        by_variant.setdefault(r["variant"], {})[r["partition"]] = r
+        if final_stage and row["stage"] != final_stage:
+            continue
+        by_variant.setdefault(row["variant"], {})[row["partition"]] = row
 
     missing: list[str] = []
     not_verified: list[str] = []
     expected_total = 0
     for variant, g in groups.items():
-        rows = by_variant.get(variant, {})
+        variant_rows = by_variant.get(variant, {})
         expected_total += len(g["expected"])
         for key in g["expected"]:
-            if key not in rows:
+            if key not in variant_rows:
                 missing.append(f"{variant or '-'}:{key}" if variant else key)
-            elif rows[key]["status"] not in terminal:
+            elif variant_rows[key]["status"] not in terminal:
                 not_verified.append(f"{variant or '-'}:{key}" if variant else key)
 
     return {
@@ -233,3 +231,26 @@ def reconcile_generic(conn, dataset: str, expected, final_stage: str | None = No
         "not_verified": not_verified,
         "ok": not missing and not not_verified,
     }
+
+
+def reconcile_generic(conn, dataset: str, expected, final_stage: str | None = None,
+                      terminal_statuses: Sequence[str] = (VERIFIED,)) -> dict:
+    """从 SQLite 状态表对账（语义见 ``evaluate_items``）。
+
+    ⚠️ variant 必须参与对账：同一内容多 variant 的管线，若按 (dataset, stage)
+    聚合，A variant 缺的条目会被 B variant 的记录掩盖 → 假绿。
+    """
+    rows = conn.execute(
+        "SELECT * FROM pipeline_item WHERE dataset=?", (dataset,)).fetchall()
+    return evaluate_items(dataset, expected, rows, final_stage=final_stage,
+                          terminal_statuses=terminal_statuses)
+
+
+def reconcile_datasets(datasets, expected, rows, final_stage: str | None = None,
+                       terminal_statuses: Sequence[str] = (VERIFIED,)) -> list[dict]:
+    """按 dataset 分组对账（Runner 与集群 onExit 共用）：返回每组结果列表。"""
+    return [
+        evaluate_items(ds, expected, rows, final_stage=final_stage,
+                       terminal_statuses=terminal_statuses)
+        for ds in datasets
+    ]

@@ -155,14 +155,18 @@ _NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _MAX_NAME_LEN = 63
 # 参数名：YAML 模板里用 {{params.x}} 引用，必须是标识符（否则编译期无法翻译）。
 _PARAM_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+# 检查名 / artifact 名会进入编译产物里的 shell 命令与对象存储 key：限制安全字符集
+_CHECK_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+_ARTIFACT_NAME_RE = re.compile(r"^(?!\.+$)[A-Za-z0-9_.-]+$")
 # 分区键/数据集/变体会进入文件路径与对象存储 key：只允许 Unicode 字母/数字/_.-
 # （中文分区键可用；引号/空格/$ 等 shell 元字符会破坏脚本与 key，拒绝）。
 # 额外排除纯 "." / ".."（作为路径段可穿越；本地对象存储会拒绝而 S3 不会，必须统一）。
 _SAFE_KEY_RE = re.compile(r"^(?!\.+$)[\w.-]+$")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # k8s 运行时配置的已知字段（拼错就报错，不然会被静默忽略）。
 _ALLOWED_K8S = {"image", "image_pull_policy", "volumes", "mounts",
                 "objstore_endpoint", "service_account", "active_deadline_seconds",
-                "plugin_path"}
+                "plugin_path", "journal", "notify_webhook", "objstore_env"}
 # discover 命令在加载期执行：必须有超时，否则一个挂住的命令会卡死 load_spec。
 _DISCOVER_TIMEOUT_SECONDS = 60
 
@@ -261,9 +265,46 @@ def validate_spec(spec: PipelineSpec, *, path: str | Path = "") -> None:
             raise SpecError(f"{where}: 参数名 {key!r} 非法（只允许字母/数字/下划线）")
     if spec.k8s:
         _reject_unknown_keys(spec.k8s, _ALLOWED_K8S, f"{where}: k8s")
+        k8s = spec.k8s
+        if "journal" in k8s and not isinstance(k8s["journal"], bool):
+            raise SpecError(f"{where}: k8s.journal 必须是布尔值，实际 {k8s['journal']!r}")
+        for key in ("notify_webhook", "plugin_path", "image", "image_pull_policy",
+                    "objstore_endpoint", "service_account"):
+            if key in k8s and not isinstance(k8s[key], str):
+                raise SpecError(f"{where}: k8s.{key} 必须是字符串，实际 {k8s[key]!r}")
+        if "active_deadline_seconds" in k8s and (
+                isinstance(k8s["active_deadline_seconds"], bool)
+                or not isinstance(k8s["active_deadline_seconds"], int)):
+            raise SpecError(
+                f"{where}: k8s.active_deadline_seconds 必须是整数，"
+                f"实际 {k8s['active_deadline_seconds']!r}")
+        if k8s.get("journal") and any(not part.dataset for part in spec.partitions):
+            raise SpecError(
+                f"{where}: k8s.journal 要求每个分区的 dataset 非空"
+                f"（状态日志 key 需要 dataset 维度）")
+        if "objstore_env" in k8s:
+            obj_env = k8s["objstore_env"]
+            if not isinstance(obj_env, dict):
+                raise SpecError(f"{where}: k8s.objstore_env 必须是映射（环境变量名 -> 值）")
+            reserved = {"PIPELINE_RUN_ID", "OBJSTORE_ENDPOINT", "PIPELINE_PLUGINS",
+                        "PIPELINE_PLUGIN_PATH", "PIPELINE_WORKFLOW_STATUS",
+                        "NOTIFY_WEBHOOK"}
+            for name, value in obj_env.items():
+                if not isinstance(name, str) or not _ENV_NAME_RE.match(name):
+                    raise SpecError(f"{where}: k8s.objstore_env 变量名非法: {name!r}")
+                if name in reserved:
+                    raise SpecError(
+                        f"{where}: k8s.objstore_env 不允许覆盖框架保留变量 {name}")
+                if not isinstance(value, str):
+                    raise SpecError(
+                        f"{where}: k8s.objstore_env[{name!r}] 必须是字符串，"
+                        f"实际 {value!r}")
     for module in spec.plugins:
         if not isinstance(module, str) or not module.strip():
             raise SpecError(f"{where}: plugins 元素必须是非空模块名，实际 {module!r}")
+        if not re.match(r"^[A-Za-z_][\w.]*$", module):
+            raise SpecError(
+                f"{where}: plugins 模块名 {module!r} 非法（只允许字母/数字/下划线/点）")
     if not spec.stages:
         raise SpecError(f"{where}: stages 不能为空（没有任何 stage 的管线会静默成功）")
     if not spec.partitions:
@@ -320,6 +361,16 @@ def validate_spec(spec: PipelineSpec, *, path: str | Path = "") -> None:
                 f"{loc}: retry.policy={stage.retry.policy!r} 非法"
                 f"（可选: {sorted(_RETRY_POLICIES)}）"
             )
+        for name in stage.checks:
+            if not _CHECK_NAME_RE.match(name):
+                raise SpecError(
+                    f"{loc}: 检查名 {name!r} 非法（只允许字母/数字/下划线/连字符，"
+                    f"且不以数字开头；名字会进入编译产物的 shell 命令）")
+        for name in stage.outputs + stage.consumes + list(stage.artifacts):
+            if not _ARTIFACT_NAME_RE.match(str(name)):
+                raise SpecError(
+                    f"{loc}: artifact 名 {name!r} 非法（只允许字母/数字/_.-；"
+                    f"名字会进入对象存储 key 与 shell 命令）")
         missing_artifacts = [o for o in stage.outputs if o not in stage.artifacts]
         if missing_artifacts:
             raise SpecError(

@@ -243,7 +243,7 @@ def test_compile_gate_fetches_artifact_before_check():
     gate = next(t for t in wf["spec"]["templates"] if t["name"] == "gate-extract")
     script = gate["container"]["args"][0]
     get_pos = script.find("objstore.py get")
-    check_pos = script.find("run_check")
+    check_pos = script.find("pipeline_cli.py gate")
     assert get_pos >= 0 and check_pos > get_pos, script
     assert "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl" in script
     env = {e["name"]: e["value"] for e in gate["container"]["env"]}
@@ -321,8 +321,9 @@ def test_compile_injects_plugins_into_gate():
     assert json.loads(env["PIPELINE_PLUGINS"]) == ["my_domain_checks"], env
     assert env["PIPELINE_PLUGIN_PATH"] == "/app/examples/demo", env
     script = gate["container"]["args"][0]
-    assert "from plugins import load" in script, script
-    assert "PIPELINE_PLUGINS" in script, script
+    # 插件声明通过 env 注入，由 pipeline_cli 内部加载（不再内联 Python）
+    assert "pipeline_cli.py gate" in script, script
+    assert "from plugins import load" not in script, script
 
 
 def test_compile_gate_declares_dataset_and_variant_inputs():
@@ -417,6 +418,52 @@ def test_reject_non_integer_retry_numbers():
         "stages:\n  - {name: s, command: echo, retry: {limit: 2.0, backoff: {factor: 2.0}}}\n")
     spec = load_spec(spec_file)
     assert spec.stages[0].retry.limit == 2 and spec.stages[0].retry.factor == 2
+
+
+def test_reject_unsafe_check_and_artifact_names():
+    """检查名/artifact 名会进编译产物的 shell 命令与对象存储 key，必须是安全标识符。"""
+    _expect_spec_error(
+        "name: x\npartitions: {from: list, items: [k]}\n"
+        "stages:\n  - {name: s, command: echo, outputs: [o], "
+        "artifacts: {o: out/o.txt}, checks: [\"a'b\"]}\n",
+        "检查名")
+    _expect_spec_error(
+        "name: x\npartitions: {from: list, items: [k]}\n"
+        "stages:\n  - {name: s, command: echo, outputs: [\"o'x\"], "
+        "artifacts: {\"o'x\": out/a.txt}}\n",
+        "artifact 名")
+
+
+def test_reject_bad_k8s_config_types():
+    """k8s 新字段必须严格类型：journal 布尔、objstore_env 映射且 env 名合法。"""
+    base = "name: x\npartitions: {from: list, items: [k]}\nstages:\n  - {name: s, command: echo}\n"
+    _expect_spec_error("name: x\nk8s: {journal: \"false\"}\n" + base.split("\n", 1)[1], "journal")
+    _expect_spec_error(
+        "name: x\nk8s: {objstore_env: [A]}\n" + base.split("\n", 1)[1], "objstore_env")
+    _expect_spec_error(
+        "name: x\nk8s: {objstore_env: {\"BAD NAME\": x}}\n" + base.split("\n", 1)[1],
+        "变量名")
+    _expect_spec_error(
+        "name: x\nk8s: {active_deadline_seconds: 1.5}\n" + base.split("\n", 1)[1],
+        "active_deadline_seconds")
+
+
+def test_reject_unsafe_plugin_names_and_reserved_env():
+    """插件模块名只允许合法包路径；objstore_env 不得覆盖框架保留变量。"""
+    base = "name: x\npartitions: {from: list, items: [k]}\nstages:\n  - {name: s, command: echo}\n"
+    for bad in ('"checks_tts; id"', '"a b"', '"../evil"'):
+        _expect_spec_error(
+            "name: x\nplugins: [%s]\n" % bad + base.split("\n", 1)[1], "plugins")
+    _expect_spec_error(
+        "name: x\nk8s: {objstore_env: {PIPELINE_RUN_ID: evil}}\n"
+        + base.split("\n", 1)[1], "保留变量")
+    _expect_spec_error(
+        "name: x\nk8s: {journal: true}\npartitions: {from: range, start: 1, end: 2}\n"
+        "stages:\n  - {name: s, command: echo}\n", "dataset 非空")
+    _expect_spec_error(
+        "name: x\npartitions: {from: list, items: [k]}\n"
+        "stages:\n  - {name: s, command: echo, outputs: [\".\"], "
+        "artifacts: {\".\": out/a}}\n", "artifact 名")
 
 
 def test_reject_non_topological_consumes_and_unknown_k8s():

@@ -52,7 +52,7 @@ jobs:
           cd app
           for m in spec runner state checks resume metrics argo_io objstore spec2argo \
                    artifacts manifest dataset_steps etl_steps plugins envcompat \
-                   legacy_state_migration; do
+                   legacy_state_migration journal pipeline_cli notify; do
             python3 -c "import $m" || { echo "❌ $m 导入失败（缺依赖？）"; exit 1; }
           done
           echo "✅ 全部框架模块可离线导入"

@@ -144,6 +144,75 @@ jobs:
           /tmp/argo lint -n argo /tmp/compiled/etl-demo.yaml
           /tmp/argo submit -n argo /tmp/compiled/etl-demo.yaml --watch
 
+      # ---- 4.5 journal=on 冒烟：真实集群验证 onExit 对账路径 ----
+      # 默认（journal off）路径在上面已断言；这里额外编译一份 k8s.journal: true 的
+      # etl-demo，验证真实 Argo 下：
+      #   - 每个 stage/gate 的状态日志写入对象存储
+      #   - discover 写分区清单
+      #   - onExit 模板能读取 {{workflow.status}} 并完成对账（对账失败→工作流失败）
+      - name: 编译并提交 journal=on 变体（验证 onExit 对账）
+        run: |
+          set -e
+          python3 - <<'PY'
+          import sys
+          import yaml
+          sys.path.insert(0, 'app')
+          from spec import load_spec
+          from spec2argo import compile_workflow
+
+          spec = load_spec('pipelines/etl-demo.yaml')
+          spec.k8s['journal'] = True
+          wf = compile_workflow(spec, name='etl-demo-journal')
+          names = [t['name'] for t in wf['spec']['templates']]
+          print('journal 编译产物 templates:', names)
+          assert 'on-exit' in names, 'journal 产物缺少 on-exit'
+          assert wf['spec'].get('onExit') == 'on-exit'
+          text = yaml.safe_dump(wf, allow_unicode=True, sort_keys=False, width=120)
+          assert 'PIPELINE_WORKFLOW_STATUS' in text, 'onExit 缺少 workflow.status 注入'
+          open('/tmp/compiled/etl-demo-journal.yaml', 'w', encoding='utf-8').write(text)
+          PY
+          /tmp/argo lint -n argo /tmp/compiled/etl-demo-journal.yaml
+          /tmp/argo submit -n argo /tmp/compiled/etl-demo-journal.yaml --watch
+
+          echo "--- journal 变体最终状态 ---"
+          PHASE=$(/tmp/argo get -n argo etl-demo-journal -o json \
+                  | python3 -c "import sys,json;print(json.load(sys.stdin)['status']['phase'])")
+          echo "journal 工作流最终状态: $PHASE"
+          [ "$PHASE" = "Succeeded" ] || { echo "❌ journal 工作流未成功（onExit 对账失败会让工作流失败）"; exit 1; }
+
+          # onExit 节点必须存在且成功（对账通过才会是 Succeeded）
+          ONEXIT=$(/tmp/argo get -n argo etl-demo-journal -o json | python3 -c "
+          import sys, json
+          wf = json.load(sys.stdin)
+          nodes = [n for n in wf['status']['nodes'].values()
+                   if n.get('templateName') == 'on-exit']
+          print(f'{sum(1 for n in nodes if n["phase"] == "Succeeded")}/{len(nodes)}')
+          ")
+          echo "onExit 节点成功数: $ONEXIT"
+          [ "$ONEXIT" = "1/1" ] || { echo "❌ onExit 未成功: $ONEXIT"; exit 1; }
+
+          # 状态日志与分区清单必须真实落盘（证明跨 Pod 状态登记生效）
+          PARTS=$(/tmp/argo get -n argo etl-demo-journal -o json | python3 -c "
+          import sys, json
+          wf = json.load(sys.stdin)
+          n = [x for x in wf['status']['nodes'].values()
+               if x.get('templateName') == 'extract' and x.get('type') == 'Pod']
+          print(len(n))
+          ")
+          EXPECT_STATUS=$((3 * PARTS))
+          echo "journal 分区数: $PARTS（期望状态日志 = 3 stage × 分区 = $EXPECT_STATUS）"
+          POD=$(kubectl get pods -n argo -l app=object-store \
+                -o jsonpath='{.items[0].metadata.name}')
+          kubectl cp ci/dump_objects.py argo/"$POD":/tmp/dump_objects.py
+          OBJS=$(kubectl exec -n argo "$POD" -- python3 /tmp/dump_objects.py 2>/dev/null)
+          STATUS_COUNT=$(echo "$OBJS" | grep -c "_status/")
+          PARTITIONS=$(echo "$OBJS" | grep -c "_run/partitions.json")
+          echo "状态日志对象数: $STATUS_COUNT"
+          echo "分区清单对象数: $PARTITIONS"
+          [ "$STATUS_COUNT" -ge "$EXPECT_STATUS" ] || { echo "❌ 状态日志对象不足: $STATUS_COUNT < $EXPECT_STATUS"; exit 1; }
+          [ "$PARTITIONS" -ge 1 ] || { echo "❌ 缺少 partitions.json"; exit 1; }
+          echo "✅ journal/onExit 冒烟通过：状态日志 + 分区清单 + onExit 对账"
+
       # ---- 5. 收集证据（无论成败）----
       - name: 收集运行证据
         if: always()
@@ -151,7 +220,9 @@ jobs:
           set +e
           mkdir -p /tmp/evidence
           /tmp/argo list -n argo | tee /tmp/evidence/argo-list.txt
-          /tmp/argo get -n argo @latest -o yaml > /tmp/evidence/workflow.yaml 2>&1
+          /tmp/argo get -n argo @latest -o yaml > /tmp/evidence/workflow-latest.yaml 2>&1
+          /tmp/argo get -n argo etl-demo -o yaml > /tmp/evidence/workflow-etl-demo.yaml 2>&1
+          /tmp/argo get -n argo etl-demo-journal -o yaml > /tmp/evidence/workflow-etl-demo-journal.yaml 2>&1
           kubectl get pods -n argo -o wide | tee /tmp/evidence/pods.txt
           kubectl get events -n argo --sort-by=.lastTimestamp | tail -40 \
             | tee /tmp/evidence/events.txt

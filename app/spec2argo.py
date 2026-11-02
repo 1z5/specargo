@@ -153,7 +153,21 @@ def _objstore_get_snippet(artifacts: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def _discover_script(cmd: str, dataset: str, variants: list[str]) -> str:
+def _discover_env(spec: PipelineSpec, objstore_endpoint: str,
+                  dataset: str, variants: list[str],
+                  *, journal: bool = False) -> list[dict]:
+    env = [
+        {"name": "SPEC_DATASET", "value": dataset},
+        {"name": "SPEC_VARIANTS",
+         "value": json.dumps(variants or [""], ensure_ascii=False)},
+    ]
+    if journal:
+        env = _base_env(spec, objstore_endpoint) + env
+    return env
+
+
+def _discover_script(cmd: str, dataset: str, variants: list[str],
+                     *, journal: bool = False) -> str:
     """把用户的发现命令包一层，产出 Argo withParam 需要的 JSON 数组。
 
     输出元素是 ``{key, dataset, variant}`` 对象，而不是裸字符串——
@@ -184,6 +198,9 @@ def _discover_script(cmd: str, dataset: str, variants: list[str]) -> str:
         "         for k in lines for v in variants]\n"
         "print(json.dumps(items, ensure_ascii=False))\n"
         "PY\n"
+        + ('python3 /app/objstore.py put --key '
+           '"runs/$PIPELINE_RUN_ID/_run/partitions.json" --file /tmp/out/items.json\n'
+           if journal else '')
     )
 
 
@@ -219,32 +236,46 @@ def _resolve_for_gate(value, *, spec: PipelineSpec, artifact_path: str):
     return value
 
 
-def _gate_env(spec: PipelineSpec, objstore_endpoint: str) -> list[dict]:
-    """gate 容器的环境变量：run_id / 对象存储端点 / 领域插件声明。
-
-    领域插件在本地 runner 与集群 gate 必须走同一条加载路径，否则
-    "本地过检、集群报未注册检查"——这是归档后最容易踩的语义漂移。
-    插件模块需在镜像内，路径由 spec 的 k8s.plugin_path 指定。
-    """
+def _base_env(spec: PipelineSpec, objstore_endpoint: str) -> list[dict]:
+    """所有集群容器共用：run_id / 对象存储端点 / 用户自定义对象存储 env。"""
     env = [
         {"name": "PIPELINE_RUN_ID", "value": "{{workflow.name}}"},
         {"name": "OBJSTORE_ENDPOINT", "value": objstore_endpoint},
     ]
-    if spec.plugins:
-        env.append({"name": "PIPELINE_PLUGINS",
-                    "value": json.dumps(spec.plugins, ensure_ascii=False)})
-        plugin_path = (spec.k8s or {}).get("plugin_path", "")
-        if plugin_path:
-            env.append({"name": "PIPELINE_PLUGIN_PATH", "value": str(plugin_path)})
+    for name, value in ((spec.k8s or {}).get("objstore_env") or {}).items():
+        env.append({"name": str(name), "value": str(value)})
     return env
 
 
-def _gate_snippet(stage: Stage, spec: PipelineSpec) -> str:
-    """质量闸门：独立 Pod 先按路径契约把产物取回来，再跑 checks.py 插件。
+def _plugin_env(spec: PipelineSpec) -> list[dict]:
+    """领域插件声明注入容器 env（本地 runner 与集群 gate 同源加载）。"""
+    if not spec.plugins:
+        return []
+    env = [{"name": "PIPELINE_PLUGINS",
+            "value": json.dumps(spec.plugins, ensure_ascii=False)}]
+    plugin_path = (spec.k8s or {}).get("plugin_path", "")
+    if plugin_path:
+        env.append({"name": "PIPELINE_PLUGIN_PATH", "value": str(plugin_path)})
+    return env
+
+
+def _state_put_snippet(stage_name: str, status: str) -> str:
+    """stage/gate 结束后把 item 终态写入对象存储状态日志（集群跨 Pod）。"""
+    return (
+        'python3 /app/pipeline_cli.py state put-remote --run-id "$PIPELINE_RUN_ID" '
+        '--dataset "{{inputs.parameters.dataset}}" '
+        '--partition "{{inputs.parameters.partition}}" '
+        '--variant "{{inputs.parameters.variant}}" '
+        '--stage %s --status %s' % (shlex.quote(stage_name), status)
+    )
+
+
+def _gate_snippet(stage: Stage, spec: PipelineSpec, *, journal: bool = False) -> str:
+    """质量闸门：独立 Pod 先按路径契约把产物取回来，再调用框架 CLI 跑 checks。
 
     为什么必须先 get：gate 与 producer 是两个 Pod，不能假设同节点共享 hostPath。
-    早期版本 gate 直接读节点本地文件，CI 里 15/15 个 gate 恰好与 producer 同节点
-    才通过——换调度就是误红/读陈旧数据误绿，等于集群侧没有质量保证。
+    为什么改成 CLI：旧实现把配置/检查名内联进 ``python3 -c`` / heredoc，
+    引号与运行期值容易破坏脚本；CLI 让同一套逻辑本地可单测、集群只负责编排。
     """
     if not stage.checks:
         return ""
@@ -255,33 +286,90 @@ def _gate_snippet(stage: Stage, spec: PipelineSpec) -> str:
     artifact_name = stage.outputs[0]
     local_path = translate(stage.artifacts[artifact_name])
     cfg = _resolve_for_gate(stage.check_config, spec=spec, artifact_path=local_path)
-    return (
-        "set -e\n"
-        "python3 /app/objstore.py get --key \"%s\" --file %s\n"
-        % (_artifact_key(artifact_name), shlex.quote(local_path))
-        + "cat > /tmp/gate_config.json <<'JSON'\n"
-        + json.dumps(cfg, ensure_ascii=False, indent=0)
-        + "\nJSON\n"
-        "python3 - <<'PY'\n"
-        "import json, os, sys\n"
-        "sys.path.insert(0, '/app')\n"
-        "from pathlib import Path\n"
-        "from plugins import load as _load_plugins\n"
-        "_mods = json.loads(os.environ.get('PIPELINE_PLUGINS', '[]'))\n"
-        "if _mods:\n"
-        "    _dirs = [p for p in [os.environ.get('PIPELINE_PLUGIN_PATH', '')] if p]\n"
-        "    _load_plugins(_mods, search_dirs=_dirs)\n"
-        "from checks import run_check\n"
-        "cfg = json.load(open('/tmp/gate_config.json', encoding='utf-8'))\n"
-        "failed = []\n"
-        "for name in " + repr(list(stage.checks)) + ":\n"
-        "    r = run_check(name, Path(" + repr(local_path) + "), cfg.get(name, {}), {})\n"
-        "    print(f'[gate] {name}: passed={r.passed} metric={r.metric} {r.detail}')\n"
-        "    if not r.passed:\n"
-        "        failed.append(name)\n"
-        "sys.exit(1 if failed else 0)\n"
-        "PY\n"
-    )
+    lines = [
+        "set -e",
+        'python3 /app/objstore.py get --key "%s" --file %s'
+        % (_artifact_key(artifact_name), shlex.quote(local_path)),
+        "cat > /tmp/gate_config.json <<'JSON'",
+        json.dumps(cfg, ensure_ascii=False, indent=0),
+        "JSON",
+        "python3 /app/pipeline_cli.py gate --stage %s --artifact %s --checks '%s' "
+        "--check-config-file /tmp/gate_config.json --run-id \"$PIPELINE_RUN_ID\""
+        % (shlex.quote(stage.name), shlex.quote(local_path),
+           json.dumps(list(stage.checks), ensure_ascii=False)),
+    ]
+    if journal:
+        lines[-1] += (
+            ' --journal --dataset "{{inputs.parameters.dataset}}" '
+            '--partition "{{inputs.parameters.partition}}" '
+            '--variant "{{inputs.parameters.variant}}"'
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _topo_order(stages: list[Stage]) -> list[Stage]:
+    """按依赖拓扑排序（取"最后一个 stage"不能假设 YAML 声明顺序是拓扑序）。"""
+    remaining = list(stages)
+    installed: list[str] = []
+    order: list[Stage] = []
+    while remaining:
+        progressed = False
+        for stage in list(remaining):
+            if all(dep in installed for dep in stage.dependencies):
+                installed.append(stage.name)
+                order.append(stage)
+                remaining.remove(stage)
+                progressed = True
+        if not progressed:
+            raise SpecError("stage 依赖无法拓扑排序（成环或引用不存在）")
+    return order
+
+
+def _on_exit_template(spec: PipelineSpec, *, image: str, pull_policy: str,
+                      objstore_endpoint: str, use_discover: bool,
+                      partition_items: list[dict], final_stage: str,
+                      terminal_statuses: list[str]) -> dict:
+    """onExit：从对象存储状态日志对账，差异非空则让工作流失败（+ 可选告警）。"""
+    lines = ["set -e"]
+    if use_discover:
+        lines += [
+            "if ! python3 /app/objstore.py get "
+            '--key "runs/$PIPELINE_RUN_ID/_run/partitions.json" '
+            "--file /tmp/partitions.json; then",
+            '  if [ "$PIPELINE_WORKFLOW_STATUS" = "Failed" ] || '
+            '[ "$PIPELINE_WORKFLOW_STATUS" = "Error" ]; then',
+            '    echo "[onExit] 工作流已失败且没有分区清单，跳过对账"',
+            "    exit 0",
+            "  fi",
+            # 成功路径拿不到分区清单 = 无法证明数据完整，必须失败（否则假绿）
+            '  echo "[onExit] 工作流成功但分区清单缺失，无法对账"',
+            "  exit 1",
+            "fi",
+        ]
+    else:
+        lines += ["cat > /tmp/partitions.json <<'JSON'",
+                  json.dumps(partition_items, ensure_ascii=False), "JSON"]
+    lines.append(
+        'python3 /app/pipeline_cli.py reconcile-journal --run-id "$PIPELINE_RUN_ID" '
+        "--partitions-file /tmp/partitions.json --final-stage %s "
+        "--terminal-statuses '%s' --report-json /tmp/reconcile-report.json"
+        % (shlex.quote(final_stage), json.dumps(terminal_statuses)))
+    env = _base_env(spec, objstore_endpoint)
+    env.append({"name": "PIPELINE_WORKFLOW_STATUS", "value": "{{workflow.status}}"})
+    webhook = (spec.k8s or {}).get("notify_webhook", "")
+    if webhook:
+        env.append({"name": "NOTIFY_WEBHOOK", "value": str(webhook)})
+    return {
+        "name": "on-exit",
+        "timeout": "10m",
+        "container": {
+            "image": image,
+            "imagePullPolicy": pull_policy,
+            "command": ["sh", "-c"],
+            "args": ["\n".join(lines) + "\n"],
+            "env": env,
+        },
+    }
 
 
 def _assert_no_spec_templates(wf: dict, source: str = "") -> None:
@@ -317,6 +405,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
         "objstore_endpoint", "http://object-store.argo.svc.cluster.local:5000")
     service_account = k8s.get("service_account", "default")
     active_deadline = int(k8s.get("active_deadline_seconds", 1800))
+    journal = bool(k8s.get("journal", False))
 
     # artifact 名 -> 产出它的 stage（用于给下游接线 get）
     produced_by: dict[str, str] = {}
@@ -354,12 +443,9 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
                 "imagePullPolicy": pull_policy,
                 "command": ["sh", "-c"],
                 "args": [_discover_script(discover_cmd, discover_dataset,
-                                          variants or [""])],
-                "env": [
-                    {"name": "SPEC_DATASET", "value": discover_dataset},
-                    {"name": "SPEC_VARIANTS",
-                     "value": json.dumps(variants or [""], ensure_ascii=False)},
-                ],
+                                          variants or [""], journal=journal)],
+                "env": _discover_env(spec, objstore_endpoint, discover_dataset,
+                                     variants or [""], journal=journal),
                 "volumeMounts": volume_mounts,
             },
             "outputs": {
@@ -388,6 +474,9 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
         put_snip = _objstore_put_snippet(stage.artifacts)
         if put_snip:
             parts.append(put_snip)
+        if journal:
+            # 产物落对象存储后登记 generated；gate 通过后会覆盖为 verified
+            parts.append(_state_put_snippet(stage.name, "generated"))
         script = "\n".join(p for p in parts if p)
 
         container = {
@@ -395,10 +484,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
             "imagePullPolicy": pull_policy,
             "command": ["sh", "-c"],
             "args": [script],
-            "env": [
-                {"name": "PIPELINE_RUN_ID", "value": "{{workflow.name}}"},
-                {"name": "OBJSTORE_ENDPOINT", "value": objstore_endpoint},
-            ],
+            "env": _base_env(spec, objstore_endpoint),
         }
         if volume_mounts:
             container["volumeMounts"] = volume_mounts
@@ -434,8 +520,8 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
                 "image": image,
                 "imagePullPolicy": pull_policy,
                 "command": ["sh", "-c"],
-                "args": [_gate_snippet(stage, spec)],
-                "env": _gate_env(spec, objstore_endpoint),
+                "args": [_gate_snippet(stage, spec, journal=journal)],
+                "env": _base_env(spec, objstore_endpoint) + _plugin_env(spec),
             }
             if volume_mounts:
                 gate_container["volumeMounts"] = volume_mounts
@@ -494,6 +580,17 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
 
     templates.insert(0, {"name": "main", "dag": {"tasks": tasks}})
 
+    if journal:
+        ordered = _topo_order(spec.stages)
+        final_stage = ordered[-1]
+        terminal = (["verified"] if final_stage.checks
+                    else ["generated", "verified"])
+        templates.append(_on_exit_template(
+            spec, image=image, pull_policy=pull_policy,
+            objstore_endpoint=objstore_endpoint, use_discover=use_discover,
+            partition_items=partition_items, final_stage=final_stage.name,
+            terminal_statuses=terminal))
+
     wf_spec: dict = {
         "entrypoint": "main",
         "activeDeadlineSeconds": active_deadline,
@@ -503,6 +600,8 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
         "volumes": [{"name": n, **v} for n, v in volumes.items()],
         "templates": templates,
     }
+    if journal:
+        wf_spec["onExit"] = "on-exit"
     arguments = _workflow_arguments(spec)
     if arguments:
         wf_spec["arguments"] = {"parameters": arguments}

@@ -383,16 +383,18 @@ def test_compile_wires_object_store_contract():
 
 
 def test_compile_emits_gate_for_checks():
-    """有 checks 的 stage 必须生成独立 gate 任务，且跑真实插件。"""
+    """有 checks 的 stage 必须生成独立 gate 任务，且调用框架 CLI 跑真实检查。"""
     from spec2argo import compile_workflow
 
     spec = _load_etl_spec()
     wf = compile_workflow(spec)
     by_name = {t["name"]: t for t in wf["spec"]["templates"]}
     gate = by_name["gate-extract"]["container"]["args"][0]
-    assert "from checks import run_check" in gate
+    # gate 不再是内联 Python 片段，而是调用本地也可单测的 CLI
+    assert "pipeline_cli.py gate" in gate
     assert "row_count" in gate and "file_nonempty" in gate
-    assert "sys.exit(1 if failed else 0)" in gate
+    assert "--check-config-file" in gate
+    assert "from checks import run_check" not in gate
 
 
 def test_compile_discover_outputs_json_array():
