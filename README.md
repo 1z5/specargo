@@ -1,7 +1,7 @@
 # specargo
 
 ![unit-tests](https://github.com/1z5/specargo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：100 个离线用例（框架 96 + 领域示例 4），Python 3.11 + 3.12 -->
+<!-- unit-tests：101 个离线用例（框架 97 + 领域示例 4），Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/specargo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一个声明式批量数据管线框架：定义一次，本地可跑，也能编译成 Argo CRD 上集群。**
@@ -111,7 +111,7 @@ mkdir -p /tmp/compiled
 python3 app/spec2argo.py pipelines/etl-demo.yaml -o /tmp/compiled/etl-demo.yaml
 argo lint --offline /tmp/compiled/etl-demo.yaml
 
-# 4) 离线测试：100 例（框架 96 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
+# 4) 离线测试：101 例（框架 97 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
 for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 
 # 5) 集群冒烟（CI 自动跑；也可手动触发）
@@ -175,7 +175,7 @@ k8s:
 
 ## 已验证 / 未验证
 
-**已验证（100 个离线用例 = 框架 96 + 领域示例 4，+ 集群 E2E）**：
+**已验证（101 个离线用例 = 框架 97 + 领域示例 4，+ 集群 E2E）**：
 
 - 框架 `tests/test_framework.py`（32 例）：spec 解析与严格校验、四类通用检查、runner 断点跳过 /
   依赖阻断 / 重试 / attempt 计数、对账按 variant 分组抓假绿、`spec2argo` 编译产物结构 /
@@ -189,7 +189,7 @@ k8s:
 - P0 回归 `tests/test_p0_regressions.py`（27 例）：把审计中实测到的静默失败 / 假绿固化为断言
   （spec 写错必须报错、无质量闸门 stage 的 resume 与对账、编译产物的参数 / 扇出 / 检查配置、
   集群 gate 取数走对象存储）；完整清单见 [`docs/ROADMAP.md`](docs/ROADMAP.md)「P0 修复」
-- 集群侧语义 `tests/test_cluster_semantics.py`（15 例）：gate CLI（内置/领域插件）、
+- 集群侧语义 `tests/test_cluster_semantics.py`（16 例）：gate CLI（内置/领域插件）、
   SQLite/对象存储状态登记、journal 对账 CLI（PASS/FAIL 与退出码）、编译产物
   onExit/状态写入结构、**按 Pod 语义端到端模拟**（stage → gate → onExit；缺数时 onExit 失败）
 - 领域示例 `examples/tts-asr/tests/test_tts_state.py`（4 例）：书籍口径 ↔ 通用状态表映射、
@@ -354,7 +354,7 @@ examples/tts-asr/         领域插件示例（TTS 生成 + ASR 回检 + 对账�
 pipelines/                通用管线定义（dataset-build.yaml / etl-demo.yaml）
 k8s/                      CI 基础设施（object-store / artifact-repository / 历史 smoke）
 docs/                     架构（ARCHITECTURE.md）与计划（ROADMAP.md）
-tests/                    离线测试（框架 96 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
+tests/                    离线测试（框架 97 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
 Dockerfile                通用 CI 镜像（moto S3 + app/）
 ```
 

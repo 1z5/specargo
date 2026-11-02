@@ -133,8 +133,22 @@ jobs:
           chmod +x /tmp/argo
           /tmp/argo version
 
-          # 编译产物（与 unit-tests 用的是同一个编译器）
-          python3 app/spec2argo.py pipelines/etl-demo.yaml -o /tmp/compiled/etl-demo.yaml
+          # 编译产物（与 unit-tests 用的是同一个编译器）。
+          # 仅 CI 覆盖 pod_gc_strategy=""：保留 Pod 以便后面做跨节点/数量断言，
+          # 仓库里 pipelines/*.yaml 的默认行为仍是成功后清理（OnWorkflowSuccess）。
+          python3 - <<'PY'
+          import sys
+          import yaml
+          sys.path.insert(0, 'app')
+          from spec import load_spec
+          from spec2argo import compile_workflow
+
+          spec = load_spec('pipelines/etl-demo.yaml')
+          spec.k8s['pod_gc_strategy'] = ''
+          wf = compile_workflow(spec)
+          open('/tmp/compiled/etl-demo.yaml', 'w', encoding='utf-8').write(
+              yaml.safe_dump(wf, allow_unicode=True, sort_keys=False, width=120))
+          PY
           echo "--- 编译产物 template 清单 ---"
           python3 -c "
           import yaml
@@ -162,6 +176,7 @@ jobs:
 
           spec = load_spec('pipelines/etl-demo.yaml')
           spec.k8s['journal'] = True
+          spec.k8s['pod_gc_strategy'] = ''   # 保留 Pod 便于断言 onExit/节点
           wf = compile_workflow(spec, name='etl-demo-journal')
           names = [t['name'] for t in wf['spec']['templates']]
           print('journal 编译产物 templates:', names)

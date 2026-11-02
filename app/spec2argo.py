@@ -406,6 +406,8 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
     service_account = k8s.get("service_account", "default")
     active_deadline = int(k8s.get("active_deadline_seconds", 1800))
     journal = bool(k8s.get("journal", False))
+    # 默认成功后清理 Pod（默认行为不变）；CI 需要保留 Pod 做跨节点断言时可置空
+    pod_gc_strategy = str(k8s.get("pod_gc_strategy", "OnWorkflowSuccess"))
 
     # artifact 名 -> 产出它的 stage（用于给下游接线 get）
     produced_by: dict[str, str] = {}
@@ -594,12 +596,13 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
     wf_spec: dict = {
         "entrypoint": "main",
         "activeDeadlineSeconds": active_deadline,
-        "podGC": {"strategy": "OnWorkflowSuccess"},
         "ttlStrategy": {"secondsAfterCompletion": 3600},
         "serviceAccountName": service_account,
         "volumes": [{"name": n, **v} for n, v in volumes.items()],
         "templates": templates,
     }
+    if pod_gc_strategy:
+        wf_spec["podGC"] = {"strategy": pod_gc_strategy}
     if journal:
         wf_spec["onExit"] = "on-exit"
     arguments = _workflow_arguments(spec)

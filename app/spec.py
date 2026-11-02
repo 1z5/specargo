@@ -166,7 +166,8 @@ _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # k8s 运行时配置的已知字段（拼错就报错，不然会被静默忽略）。
 _ALLOWED_K8S = {"image", "image_pull_policy", "volumes", "mounts",
                 "objstore_endpoint", "service_account", "active_deadline_seconds",
-                "plugin_path", "journal", "notify_webhook", "objstore_env"}
+                "plugin_path", "journal", "notify_webhook", "objstore_env",
+                "pod_gc_strategy"}
 # discover 命令在加载期执行：必须有超时，否则一个挂住的命令会卡死 load_spec。
 _DISCOVER_TIMEOUT_SECONDS = 60
 
@@ -269,7 +270,7 @@ def validate_spec(spec: PipelineSpec, *, path: str | Path = "") -> None:
         if "journal" in k8s and not isinstance(k8s["journal"], bool):
             raise SpecError(f"{where}: k8s.journal 必须是布尔值，实际 {k8s['journal']!r}")
         for key in ("notify_webhook", "plugin_path", "image", "image_pull_policy",
-                    "objstore_endpoint", "service_account"):
+                    "objstore_endpoint", "service_account", "pod_gc_strategy"):
             if key in k8s and not isinstance(k8s[key], str):
                 raise SpecError(f"{where}: k8s.{key} 必须是字符串，实际 {k8s[key]!r}")
         if "active_deadline_seconds" in k8s and (

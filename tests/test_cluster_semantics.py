@@ -211,6 +211,17 @@ def test_compile_journal_emits_on_exit_and_state_puts():
     assert '--terminal-statuses \'["generated", "verified"]\'' in ox
 
 
+def test_compile_pod_gc_strategy_is_configurable():
+    """podGC 默认成功后清理 Pod；CI 可设为空保留 Pod 做跨节点断言。"""
+    default = compile_workflow(load_spec(str(ROOT / "pipelines" / "etl-demo.yaml")))
+    assert default["spec"]["podGC"]["strategy"] == "OnWorkflowSuccess"
+    spec = load_spec(str(ROOT / "pipelines" / "etl-demo.yaml"))
+    spec.k8s["pod_gc_strategy"] = ""
+    assert "podGC" not in compile_workflow(spec)["spec"]
+    spec.k8s["pod_gc_strategy"] = "Never"
+    assert compile_workflow(spec)["spec"]["podGC"]["strategy"] == "Never"
+
+
 def test_compile_without_journal_is_unchanged():
     """默认不带 journal 的管线（CI 用的就是这种）不得多出 onExit/状态写入。"""
     spec = load_spec(str(ROOT / "pipelines" / "etl-demo.yaml"))
