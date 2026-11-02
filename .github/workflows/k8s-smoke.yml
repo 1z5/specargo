@@ -257,13 +257,13 @@ jobs:
       - name: 断言结果
         run: |
           set -e
-          PHASE=$(/tmp/argo get -n argo @latest -o json 2>/dev/null \
+          PHASE=$(/tmp/argo get -n argo etl-demo -o json 2>/dev/null \
                   | python3 -c "import sys,json;print(json.load(sys.stdin)['status']['phase'])")
           echo "工作流最终状态: $PHASE"
           [ "$PHASE" = "Succeeded" ] || { echo "❌ 工作流未成功"; exit 1; }
           # 12 个 task 节点（4 阶段 × 3 分区）必须全部 Succeeded
           # 动态计算：不写死数量（分区数由 discover 决定，可能是 5 也可能是 50）
-          OK=$(/tmp/argo get -n argo @latest -o json 2>/dev/null | python3 -c "
+          OK=$(/tmp/argo get -n argo etl-demo -o json 2>/dev/null | python3 -c "
           import sys, json
           wf = json.load(sys.stdin)
           nodes = [n for n in wf['status']['nodes'].values()
@@ -277,11 +277,11 @@ jobs:
 
           # 动态工作流：分区数由 discover 决定，Pod 数也应随之推导，不写死
           echo "--- 动态扇出验证 ---"
-          # workflow 名从 @latest 取（编译产物用 spec.name，不再写死 etl-smoke）
-          WF_NAME=$(/tmp/argo get -n argo @latest -o json 2>/dev/null \
+          # workflow 名显式取主工作流（journal 冒烟之后 @latest 会指向 etl-demo-journal）
+          WF_NAME=$(/tmp/argo get -n argo etl-demo -o json 2>/dev/null \
                     | python3 -c "import sys, json; print(json.load(sys.stdin)['metadata']['name'])")
           echo "workflow 名: $WF_NAME"
-          PARTS=$(/tmp/argo get -n argo @latest -o json 2>/dev/null | python3 -c "
+          PARTS=$(/tmp/argo get -n argo etl-demo -o json 2>/dev/null | python3 -c "
           import sys, json
           wf = json.load(sys.stdin)
           n = [x for x in wf['status']['nodes'].values()
