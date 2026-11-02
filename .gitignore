@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .env
 output/
+out/
 verify_report/
 *.db
 *.db-wal

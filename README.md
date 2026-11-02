@@ -1,7 +1,7 @@
 # tts-pipeline-argo
 
 ![unit-tests](https://github.com/1z5/tts-pipeline-argo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：54 个离线用例，Python 3.11 + 3.12 -->
+<!-- unit-tests：79 个离线用例（框架 33 + 断点续跑/状态 9 + 服务·存储·指标 14 + P0 回归 23），Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/tts-pipeline-argo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一个声明式批量数据管线框架：定义一次，本地可跑、也能编译成 Argo CRD 上集群。**
@@ -13,8 +13,9 @@
 隔离区、对象存储抽象、Prometheus 指标、常驻处理服务。
 
 > **边界（说清楚，不含糊）**：`spec → Argo CRD` 的编译器已落地
-> （`app/spec2argo.py`，CI 提交编译产物跑集群），但只覆盖 container 命令 +
-> checks + artifacts 子集；script 型 template、synchronization、suspend 尚未映射，
+> （`app/spec2argo.py`，CI 提交编译产物跑集群），覆盖 container 命令 + checks +
+> artifacts + 参数/扇出/检查配置映射，并对编译产物做"零残留模板变量"自检；
+> script 型 template、synchronization、suspend、onExit 尚未映射，
 > 仍有覆盖缺口——见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
 
 设计来自我在内容生产团队做批量 TTS 管线的真实经验，重构为可复现的开源参考实现：
@@ -43,16 +44,10 @@
 
 - 分片规则：`shard = sha256(id) % N`（不用内置 `hash()`，它受 `PYTHONHASHSEED` 影响）
 - 每次产出附 manifest：条数、分片清单、逐片 sha256、输入指纹
-- 独立复核：`command` 检查跑 `manifest.py verify`，条数合计/校验和/分片齐全任一不符即失败
+- 双层校验：`shard` stage 命令内跑 `manifest.py verify` 做深度自校验（条数合计/校验和/分片齐全）；
+  集群 gate 只做 manifest 结构校验（`json_schema`），因为它能跨 Pod 取回的只有单文件 artifact
 
-```bash
-# 本地全链路（不依赖外部数据源）
-python3 app/dataset_steps.py seed  --partition 1 --out out/raw/1.jsonl
-python3 app/dataset_steps.py clean --in out/raw/1.jsonl --out out/clean/1.jsonl --quarantine out/quarantine/1.jsonl
-python3 app/dataset_steps.py shard --in out/clean/1.jsonl --out-dir out/shards/1 \
-        --shards 2 --manifest out/manifest/1.json --dataset raw_partition --version v1 --base-dir out
-python3 app/manifest.py verify --manifest out/manifest/1.json --base-dir out
-```
+本地全链路命令（seed → clean → shard → verify，零外部依赖、实测可跑）见「[快速开始](#快速开始)」第 1 步。
 
 ## 解决什么问题
 
@@ -73,45 +68,70 @@ python3 app/manifest.py verify --manifest out/manifest/1.json --base-dir out
 | 能力域 | 实现 |
 |---|---|
 | **任务编排** | `spec.py` + `runner.py`：声明式 stage / dependencies / retry / timeout，分区支持 list、range、discover（动态发现）三种来源 |
-| **可靠性与恢复** | `runner.py` 框架级断点续跑（已过检的 stage×partition 直接跳过）、`resume.py` 输入 sha256 指纹、`retryStrategy` 分层（瞬时错误才重试）、`dependencies` 阻断语义 |
-| **常驻处理服务** | `service.py`：`/healthz` `/readyz` 两种探针语义、`/process` 同步与 `/tasks` 异步、`POST /tasks/{id}/retry` 失败重处理、Processor 插件式接入、SIGTERM 四步优雅停机 |
+| **可靠性与恢复** | `runner.py` 框架级断点续跑（已到成功终态的 stage×partition 直接跳过）、`resume.py` 输入 sha256 指纹、`retryStrategy` 分层（瞬时错误才重试）、`dependencies` 阻断语义 |
+| **常驻处理服务** | `service.py`：标准库 HTTP 常驻服务，`/healthz` `/readyz` 两种探针语义、`/process` 同步与 `/tasks` 异步、`POST /tasks/{id}/retry` 失败重处理、Processor 扩展点（当前仅内置 `echo` 示例）、SIGTERM 四步优雅停机 |
 | **数据质量** | `checks.py` 插件注册表（4 个通用检查）+ `tts_verify/` 句子级三态判定 + `summary.py` expected vs actual 对账（漏生成/未过检/重复文件/内容重复） |
 | **状态与追溯** | `state.py` item 级状态表（dataset/partition/variant/stage 四元组主键）、run_id 全程贯穿日志与产物 |
-| **可观测性** | `metrics.py` Prometheus text 格式指标（执行数/耗时分布/进度/积压/对账缺失/inflight）、`notify.py` onExit 收口告警 |
-| **存储抽象** | `artifacts.py` 对象存储契约 + 本地目录 / S3 兼容双实现，key 目录穿越防护，digest 用于变更检测 |
-| **容器与编排** | `Dockerfile` + `k8s/workflow.yaml` / `cronworkflow.yaml`；CI 在 kind + Argo Workflows v3.7.18 上实测跑通（31/31 Pod：1 discover + 6 × 5 分区 = 3 阶段 + 3 质量闸门）；提交的是 spec2argo 编译产物，暂无 onExit |
+| **可观测性** | `metrics.py` Prometheus text 格式指标（执行数/耗时分布/积压/对账缺失/inflight；`stage_progress` 已定义但当前未接线）、`notify.py` onExit 收口告警 |
+| **存储抽象** | `artifacts.py` 对象存储契约 + 本地目录 / S3 兼容双实现，key 目录穿越防护；`digest` 仅本地目录实现提供、应用代码暂未调用 |
+| **容器与编排** | `Dockerfile.ci` + `k8s/object-store.yaml` + `spec2argo` 编译产物；CI 在 kind + Argo Workflows v3.7.18 上实测跑通（31/31 Pod：1 discover + 6 × 5 分区 = 3 个 stage + 3 个质量闸门）。`k8s/workflow.yaml` / `cronworkflow.yaml` 是文档级示例（未在 CI 部署，需自备镜像/存储）；编译产物暂无 onExit |
 | **多模态处理** | TTS/ASR 链路（音频批量生成 + 回检），`docs/VERIFICATION.md` 记录了模型静默截断这类无告警故障的定位方法 |
-| **成本与效率** | 并发与重试参数化、输入指纹避免重复计算、`--force` 受控大批量重处理、YAML 内 requests/limits 与节点池隔离 |
+| **成本与效率** | 并发与重试参数化、输入指纹避免重复计算、`--force` 受控大批量重处理、stage 级 requests/limits 编译进 container；`nodeSelector`/`tolerations` 编译器尚未映射（跨节点只用手写 smoke 的 `podAntiAffinity` 软偏好） |
 
 ## 快速开始
 
+以下命令都不依赖集群与 API key（TTS 领域示例除外，见本节末尾）。
+
 ```bash
-cd app
-pip install -r requirements.txt
-cp ../.env.example .env        # 填 OPENAI_API_KEY
+# 1) 数据集构建链路：seed → clean → shard → manifest（零外部依赖，实测可跑）
+python3 app/dataset_steps.py seed  --partition 1 --out out/raw/1.jsonl
+python3 app/dataset_steps.py clean --in out/raw/1.jsonl --out out/clean/1.jsonl --quarantine out/quarantine/1.jsonl
+python3 app/dataset_steps.py shard --in out/clean/1.jsonl --out-dir out/shards/1 \
+        --shards 2 --manifest out/manifest/1.json --dataset raw_partition --version v1 --base-dir out
+python3 app/manifest.py verify --manifest out/manifest/1.json --base-dir out
 
-# 生成（断点续跑默认开启，二次跑会跳过未变的章节）
-python main.py production books/book_a.json
+# 2) 通用 ETL 管线（本地 runner，不需要 Argo 集群；--workdir 会自动创建）
+python3 app/runner.py pipelines/etl-demo.yaml --state-db /tmp/etl-run/state.db --workdir /tmp/etl-run
+# 第二次：已完成的 stage×partition 全部 resume 跳过
+python3 app/runner.py pipelines/etl-demo.yaml --state-db /tmp/etl-run/state.db --workdir /tmp/etl-run
 
-# 校验漏读（三态判定 + 报告 + 退出码，可直接接 CI）
-python verify_audio.py output/book_a --min-accuracy 0.90
+# 3) 离线测试：全部套件（framework / resume-state / service-storage / P0 回归）
+#    不需要 API key 与集群；CI 在 Python 3.11 / 3.12 上自动跑
+for f in tests/test_*.py; do python3 "$f"; done
 
-# 对账：expected vs actual，漏数/未过检/重复 → 非零退出码
-python summary.py --state-db state.db --books books/book_a.json --voice cedar
-
-# 测试（54 个用例，不需要 API key 与集群；CI 双 Python 版本自动跑）
-cd .. && python3 tests/test_framework.py && python3 tests/test_service_and_storage.py
-
-# 本地 lint Argo YAML（离线，无需集群）
+# 4) 本地 lint Argo YAML（需自行安装 argo CLI；离线，无需集群）
 argo lint --offline k8s/workflow-etl-smoke.yaml
 
-# 集群冒烟（CI 自动跑；也可手动触发）
+# 5) 集群冒烟（CI 自动跑；也可手动触发）
 gh workflow run k8s-smoke -R 1z5/tts-pipeline-argo
 ```
 
-## Argo Workflows 编排
+### TTS 领域示例（需要额外的密钥/依赖，不在离线测试范围内）
 
-`k8s/workflow.yaml`（单次批量）与 `k8s/cronworkflow.yaml`（每日定时）给出完整编排：
+`pipelines/tts.yaml` 是框架的一个**领域插件示例，不是框架主线**：需要自备书籍 JSON 与
+`OPENAI_API_KEY`（另需 `app/requirements.txt` 里的 `openai` / `faster-whisper`）。
+**该参考实现当前待归档修复**——历史上 `app/main.py` 从未入库、仓库也不含 `books/` 样例数据，
+所以 `python main.py ...` 这类老命令是失效的，**入口不是 `main.py`**；修复前请只把
+`pipelines/tts.yaml` 当作文档参考。
+
+```bash
+cd app
+pip install -r requirements.txt        # 含 openai / faster-whisper 等重依赖
+cp ../.env.example .env                # 填 OPENAI_API_KEY
+
+# 真实入口是 pipeline.py（--book 指向自备的书籍 JSON）
+python3 pipeline.py --book /path/to/your_book.json --voice cedar
+# 校验与对账（依赖上一步产出与 faster-whisper 模型）
+python3 verify_audio.py output/your_book --min-accuracy 0.90
+python3 summary.py --state-db state.db --books /path/to/your_book.json --voice cedar
+```
+
+## Argo Workflows 编排（TTS 示例）
+
+`k8s/workflow.yaml`（单次批量）与 `k8s/cronworkflow.yaml`（每日定时）是 TTS 示例的
+**文档级编排**：引用 `registry.example.com` 镜像与三个 PVC，需要自备镜像/存储/密钥才能跑，
+CI 只对它们做 `argo lint` schema 校验（未在 CI 部署）。已在集群实测的是
+`pipelines/etl-demo.yaml` 的编译产物（见「已验证」一节）。
 
 - **DAG**：`generate → verify → fix(仅 when 失败) → reconcile`
 - **扇出**：`withParam` 按书展开，一个 Pod 一本书（失败影响面最小）
@@ -124,7 +144,9 @@ gh workflow run k8s-smoke -R 1z5/tts-pipeline-argo
 - **输出契约**：业务结果写 `/argo/outputs/parameters/*`，供下游 `when` 分支消费
 
 ```bash
-kubectl create configmap tts-book-lock --from-literal=book_a=1
+# 前置：自备镜像 registry.example.com/data/tts:v1、PVC tts-*-pvc、Secret tts-secrets
+# 锁 ConfigMap 要为每个提交的 slug 建 key（semaphore 按 slug 取 key）
+kubectl create configmap tts-book-lock --from-literal=book_a=1 --from-literal=book_b=1
 kubectl apply -f k8s/workflow.yaml
 argo submit -n data-platform k8s/workflow.yaml -p book-slugs=book_a,book_b --watch
 ```
@@ -160,15 +182,12 @@ argo submit -n data-platform k8s/workflow.yaml -p book-slugs=book_a,book_b --wat
 | 断点续跑 | 在 tts_client 里（任务层） | **框架层**：已 verified 的 (stage×partition) 直接跳过 |
 | 对账 | 从书籍 JSON 推导 expected | expected 由管线定义给出，按 dataset 分组 |
 
-**两个实例证明普适性**（都不含对方的知识）：
-- `pipelines/tts.yaml` — TTS 生成 + ASR 回检（`asr_three_state` 插件）
+**多个实例证明普适性**（互不包含对方的知识）：
+- `pipelines/tts.yaml` — TTS 生成 + ASR 回检（`asr_three_state` 插件；领域示例，当前待归档修复）
 - `pipelines/etl-demo.yaml` — extract → transform → load，用 `json_schema`/`row_count` 通用检查
+- `pipelines/dataset-build.yaml` — 清洗 / 去重 / 确定性分片 / manifest，用 `json_schema`/`file_nonempty` 通用检查，深度自校验在 stage 命令内
 
-```bash
-cd app
-python3 runner.py ../pipelines/etl-demo.yaml --state-db state.db --workdir /tmp/run
-python3 runner.py ../pipelines/etl-demo.yaml --state-db state.db --workdir /tmp/run   # 第二次：全部 resume 跳过
-```
+运行方式见「快速开始」第 2 步（`--workdir` 由 runner 自动创建）。
 
 ### 框架化过程中真实踩到并修掉的 4 个坑
 
@@ -181,24 +200,27 @@ python3 runner.py ../pipelines/etl-demo.yaml --state-db state.db --workdir /tmp/
 
 ## 已验证 / 未验证
 
-**已验证（54 个离线测试 + 集群 E2E）**：
-- 框架 `tests/test_framework.py` 25 例：spec 解析与严格渲染校验、四类通用检查、
+**已验证（79 个离线用例 + 集群 E2E）**：
+- 框架 `tests/test_framework.py`（33 例）：spec 解析与严格渲染校验、四类通用检查、
   runner 断点跳过/依赖阻断/重试/attempt 计数、对账按 variant 分组抓假绿、
   `spec2argo` 编译产物结构/确定性/gate/discover 输出
-- 断点续跑与状态 `tests/test_resume_state.py` 9 例：指纹跳过与输入变化、
+- 断点续跑与状态 `tests/test_resume_state.py`（9 例）：指纹跳过与输入变化、
   输出缺失重生成、item 状态幂等 upsert、对账漏生成/未过检、重复文件与内容重复检测
-- 服务/存储/指标 `tests/test_service_and_storage.py` 12 例：**真实起服务进程**验证探针、
-  异步任务全生命周期、暂停期拒新任务、SIGTERM 优雅退出（退出码 0）、retry 用原始 payload；
+- 服务/存储/指标 `tests/test_service_and_storage.py`（14 例）：**真实起服务进程**验证探针、
+  带 `--state-db` 时 readyz 与状态落库、异步任务全生命周期、暂停期拒新任务、
+  SIGTERM 优雅退出（退出码 0）、retry 用原始 payload；
   metrics 格式与原子落盘；objstore 本地/目录往返、目录穿越拒绝、CLI 退出码
-- **P0 回归断言（4 例）**：本地真实 pipeline 端到端跑绿、渲染命令无空路径、
-  runner 注入参数空值覆盖、编译产物 workflow 名正确
+- P0 回归 `tests/test_p0_regressions.py`（23 例）：把审计中实测到的静默失败/假绿固化为断言
+  （spec 写错必须报错、无质量闸门 stage 的 resume 与对账、编译产物的参数/扇出/检查配置、
+  集群 gate 取数走对象存储）
 - E2E：ETL 管线 9 verified / 二次跑 9 resume-skipped / 指标文件内容正确 / 服务冒烟含优雅停机
 
-**已在真实集群跑通（kind 多节点 + Argo Workflows v3.7.18，CI 每次 push 自动验证）**：
+**已在真实集群跑通（kind 多节点 + Argo Workflows v3.7.18，CI 每次 push 自动验证）**。
+以下为一次 CI run 的实测输出（commit `b7c5b35`）：
 
 ```
 工作流最终状态: Succeeded
-Pod 节点成功数: 31/31              # 1 discover + 6 × 5 分区（3 阶段 + 3 质量闸门）
+Pod 节点成功数: 31/31              # 1 discover + 6 × 5 分区（3 个 stage + 3 个质量闸门）
 discover 发现并扇出的分区数: 5
 Pod 分布到的节点数: 2
 对象存储中的 artifact 对象数: 15   # 5 分区 × (raw + clean + marker)
@@ -211,13 +233,13 @@ Pod 分布到的节点数: 2
 
 | 能力 | 怎么验的 | 结果 |
 |---|---|---|
-| **多节点集群 + 跨节点调度** | kind 1 控制面 + 2 worker；模板加 `podAntiAffinity` 软偏好 | Pod 分布到 2 个 worker（9 + 12） |
-| **动态工作流** | `discover` 任务扫描 ConfigMap 输入产出 JSON 数组，下游 4 阶段用 `withParam` 引用其输出扇出 | 跑哪些分区由数据决定，YAML 里无写死分区 |
-| **对象存储 artifact** | 集群内 S3 兼容端点 + `objstore.py` 按路径契约 `runs/<run_id>/<partition>/<stage>` 传递 | 16 个对象真实落盘；跨 Pod 取数不依赖任何共享卷 |
+| **多节点集群 + 跨节点调度** | kind 1 控制面 + 2 worker；模板加 `podAntiAffinity` 软偏好 | Pod 分布到 2 个 worker（17 + 14，合计 31）；CI 断言只要求 ≥ 2 个节点 |
+| **动态工作流** | `discover` 任务扫描 ConfigMap 输入产出 JSON 数组，下游 6 个扇出任务（3 个 stage + 3 个质量闸门）用 `withParam` 引用其输出扇出 | 跑哪些分区由数据决定，YAML 里无写死分区 |
+| **对象存储 artifact** | 集群内 S3 兼容端点 + `objstore.py` 按路径契约 `runs/<run_id>/<partition>/<stage>` 传递 | 15 个对象真实落盘；跨 Pod 取数不依赖任何共享卷 |
 | **质量闸门** | 每个 stage 后跟一个 `gate-<stage>` 任务，在集群里跑 `checks.py` 插件 | 不过检则 task 失败（`limit: 0` 不重试） |
 | **一份定义两个目标** | `spec2argo` 把 `pipelines/etl-demo.yaml` 编译成 Argo CRD，CI 提交编译产物 | 本地 runner 与集群不再各写一份 |
-| **重试分层** | extract/load `OnTransientError`，transform/validate `limit: 0` | 语义按失败类型区分 |
-| **onExit 收口** | 手写版 `k8s/workflow-etl-smoke.yaml` 无论成败都上传 `run.done` | 收口对象在 bucket 内；编译产物尚未生成 onExit（见 `docs/ROADMAP.md`） |
+| **重试分层** | extract `limit 2 / OnTransientError`；transform、load `limit 0`；质量闸门 `gate-<stage>` 同样 `limit 0` | 语义按失败类型区分（编译产物里没有独立的 `validate` 阶段） |
+| **onExit 收口** | 历史手写版 `k8s/workflow-etl-smoke.yaml`（CI 现已不提交该文件）无论成败都上传 `run.done` | 收口对象在 bucket 内；编译产物尚未生成 onExit（见 `docs/ROADMAP.md`） |
 
 ```bash
 # 本地 lint（离线，无需集群）
@@ -256,6 +278,8 @@ gh workflow run k8s-smoke -R 1z5/tts-pipeline-argo
 ## 目录
 
 ```
+Dockerfile      TTS 领域镜像（历史版；按仓库根构建会失败，通用镜像用 Dockerfile.ci）
+Dockerfile.ci   CI 通用镜像（moto server + app/）
 app/            应用代码
   service.py      Python 常驻处理服务（探针/同步异步/优雅停机/版本）
   artifacts.py    对象存储抽象（本地目录 / S3 兼容双实现）
@@ -275,11 +299,15 @@ app/            应用代码
   tts_client.py   TTS 客户端（指纹跳过 + 重试可配）
   verify_audio.py 校验 CLI（三态判定 + 状态登记 + Argo outputs）
   tts_verify/     校验核心包
-pipelines/      声明式管线定义（tts.yaml / etl-demo.yaml）
+pipelines/      声明式管线定义（dataset-build.yaml / etl-demo.yaml / tts.yaml）
 k8s/            Argo 编排（Workflow / CronWorkflow）
-tests/          离线测试（54 个用例：框架 / 断点续跑与状态 / 服务·存储·指标）
+tests/          离线测试（79 例：框架 33 / 断点续跑与状态 9 / 服务·存储·指标 14 / P0 回归 23）
 docs/           架构、校验机制、ROADMAP（下一步计划）
 ```
+
+镜像构建：通用镜像用 `docker build -f Dockerfile.ci -t tts-argo:ci .`
+（CI 与 `k8s/` 清单都按 `tts-argo:ci` 这个 tag 引用）。根目录 `Dockerfile` 是 TTS 领域历史镜像，
+按仓库根构建会失败（`COPY requirements.txt` 而文件在 `app/`），归档前不要使用。
 
 ## English Summary
 

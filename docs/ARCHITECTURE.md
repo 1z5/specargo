@@ -86,7 +86,7 @@
 
 | 模块 | 职责 |
 |---|---|
-| `artifacts.py` | 对象存储**抽象**：`ArtifactStore` 协议 + 本地目录 / S3 兼容双实现；key 目录穿越防护；`digest()` 用于变更检测 |
+| `artifacts.py` | 对象存储**抽象**：`ArtifactStore` 协议 + 本地目录 / S3 兼容双实现；key 目录穿越防护；`digest()` 仅本地目录实现提供、应用代码暂未调用 |
 | `objstore.py` | 对象存储 **CLI**（K8s Pod 内用）：按路径契约 `runs/<run_id>/<partition>/<stage>.<ext>` put/get |
 
 ### 领域层（TTS 管线，框架的消费者）
@@ -98,7 +98,12 @@
 | `verify_audio.py` | 校验 CLI：扫描 → 转录 → 三态判定 → 修复 → 报告 → 对账登记 |
 | `tts_verify/` | 校验核心：`normalizer` / `sentence_matcher` / `comparator` / `reporter` |
 | `summary.py` | 对账 CLI：expected vs actual + Argo 输出参数 + 非零退出码 |
-| `etl_steps.py` | ETL demo 三步（证明框架与 TTS 无关） |
+
+### 示例层（通用，非 TTS）
+
+| 模块 | 职责 |
+|---|---|
+| `etl_steps.py` | 通用 ETL 示例的三步（extract / transform / load），证明同一 runner 与 TTS 无关 |
 
 ---
 
@@ -173,6 +178,6 @@ pipelines/etl-demo.yaml ──spec2argo──► Workflow CRD ──► argo sub
 
 | 文件 | 状态 |
 |---|---|
-| `workflow-etl-smoke.yaml` | **CI 实测跑通**（kind 多节点 + Argo v3.7.18） |
+| `workflow-etl-smoke.yaml` | **历史 CI 实测跑通**（kind 多节点 + Argo v3.7.18）；当前已被编译产物取代，CI 不再提交该文件，仅作 `argo lint` 对照 |
 | `object-store.yaml` / `artifact-repository.yaml` | **CI 实测**（S3 兼容端点 + 默认仓库注解） |
 | `workflow.yaml` / `cronworkflow.yaml` | **文档级示例**：TTS 管线的 Argo 版本，引用 `registry.example.com` 镜像与 3 个 PVC，未在 CI 部署（需自备镜像与存储）。仅通过 `argo lint` schema 校验 |
