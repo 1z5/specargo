@@ -108,6 +108,9 @@
 | `resume.py` | 输入 sha256 指纹 + 产物存在性判定 | `should_skip(path, text)` / `write_fingerprint()` |
 | `state.py` | `pipeline_run` / `pipeline_item` 状态表（dataset/partition/variant/stage 四元组主键）+ 对账；打开旧库时调用兼容层迁移 | `upsert_item()` / `reconcile_generic()` |
 | `checks.py` | 检查插件注册表 + 4 个通用检查（`file_nonempty` / `json_schema` / `row_count` / `command`） | `register()` / `run_check()` / `available()` |
+| `journal.py` | 集群侧状态日志：每个 (dataset, partition, variant, stage) 写一个对象存储 JSON；分区清单写 `_run/partitions.json`；onExit 读取后用与本地同一个 `evaluate_items()` 对账 | `put_status()` / `load_statuses()` / `put_partitions()` / `get_partitions()` |
+| `pipeline_cli.py` | 集群侧调用框架语义的 CLI：`gate` / `state put` / `state put-remote` / `reconcile-journal`；编译产物不再内嵌 Python 片段 | 见 `--help` |
+| `notify.py` | 通用收口告警：对账结果渲染 + 可插拔 webhook | `render_summary()` / `send_webhook()` |
 | `metrics.py` | Counter/Gauge/Histogram + Prometheus text 输出 | `METRICS` 单例 / `write_file()` |
 
 ### 2.4 存储层
@@ -240,15 +243,26 @@ SIGTERM → begin_drain()（/readyz 立刻 503）
 
 ```
 pipelines/etl-demo.yaml ──spec2argo──► Workflow CRD ──► argo submit
-  └─► discover（读 ConfigMap 输入 → 输出 JSON 数组）
+  └─► discover（读 ConfigMap 输入 → 输出 JSON 数组；journal 开启时写 _run/partitions.json）
         └─► extract / transform / load（各自 withParam 引用 discover 输出做动态扇出）
-              └─► gate-<stage>（objstore get 取回单文件 artifact 后跑 checks 插件）
+              └─► gate-<stage>（objstore get 取回单文件 artifact → pipeline_cli.py gate）
         跨 Pod 数据经对象存储路径契约传递（objstore.py）
         编译产物自检：不得残留 {{params.*}} / {{partition.*}} 等 spec 模板变量
 ```
 
-> 手写版 `k8s/workflow-etl-smoke.yaml` 是早期实现（含 `onExit` 收口），
-> 已降级为对照参考；编译产物目前尚未生成 `onExit`（见 `docs/ROADMAP.md`）。
+**可选集群收口（`k8s.journal: true`）**：
+
+```
+stage 完成 ─► pipeline_cli.py state put-remote（写 runs/<run>/_status/...，key 独立、并发安全）
+gate 完成  ─► 覆盖同一 key 为 verified/failed
+onExit     ─► pipeline_cli.py reconcile-journal（同一 evaluate_items 判定；
+              分区清单缺失时仅"工作流已失败"才跳过，成功路径缺清单会失败）
+              ├─ 差异为空：正常收口（可发 webhook）
+              └─ 差异非空：onExit 非零退出 → 工作流失败（"跑完≠跑对"）
+```
+
+> 手写版 `k8s/workflow-etl-smoke.yaml` 是早期实现，已降级为对照参考。
+> 集群侧断点续跑（skip）未实现：状态日志当前只用于 onExit 对账，不作为 resume 依据。
 
 ---
 
@@ -262,14 +276,15 @@ pipelines/etl-demo.yaml ──spec2argo──► Workflow CRD ──► argo sub
 | `Stage.timeout` / 整批超时 | template `timeout` / `activeDeadlineSeconds` |
 | `resume` 终态判定 | 任务幂等（Argo 只保证"再执行一次"，安全性由任务自己保证） |
 | `state.upsert_item()` | 外部状态存储（Pod 之间不能靠 emptyDir 共享） |
-| `reconcile_generic()` | DAG 末节点 / `onExit` 对账 |
+| `reconcile_generic()` / `evaluate_items()` | DAG 末节点 / `onExit` 对账（状态来源：本地 SQLite 或集群状态日志） |
 | `metrics.METRICS` | controller 指标 + 自定义指标 |
 | `service.py` 的探针与停机 | liveness / readiness / startup + preStop + terminationGracePeriod |
 | `gate-<stage>` | 独立 Argo task + `retryStrategy.limit: 0` |
 
 > **已实现**：`spec2argo` 编译器（`app/spec2argo.py`，CI 提交编译产物跑集群），
 > 覆盖 container 命令 + checks + artifacts + 参数 / 扇出 / 检查配置映射；
-> 未映射 script 型 template、synchronization、suspend、onExit。
+> `k8s.journal: true` 时额外生成状态写入与 `onExit` 对账模板。
+> 未映射 script 型 template、synchronization、suspend。
 
 ---
 
@@ -296,12 +311,16 @@ docker build -t specargo:ci .        # 构建上下文为仓库根
 ## 8. 已知边界
 
 - **编译器覆盖**：container 命令 + checks + artifacts + 参数 / 扇出 / 检查配置；
-  script 型 template、synchronization、suspend、onExit 未映射。
+  可选 `k8s.journal`（状态日志 + onExit 对账）；script 型 template、synchronization、suspend 未映射。
 - **集群 gate**：只支持单文件 artifact 的跨 Pod 校验；目录 / 多产物 artifact 不支持
   （dataset-build 的深度校验因此放在 stage 命令内，gate 只做 manifest 结构校验）。
 - **命名约束**：分区 key / dataset / variant 限定 `^(?!\.+$)[\w.-]+$`，含空格 / 引号 / `$` 的值会被拒绝。
 - **参数注入**：参数值按文本替换进命令，shell 元字符会被目标 shell 二次解释；含此类字符需在 spec 内自行引号 / 转义。
-- **gate 脚本**：检查配置 / 产物路径内嵌进 Python 源码（Argo 文本替换后执行），路径含反斜杠 / 换行 / 单引号时失败；
-  彻底做法是 gate 改为从 env / argv 读取路径（后续）。
+- **gate 执行**：已改为调用 `pipeline_cli.py gate`（不再内嵌 Python 源码），行为可在本地单测；
+  集群 gate 仍只支持单文件 artifact。
+- **集群状态**：状态日志依赖对象存储；SQLite 状态表只用于本地。多写者场景未提供 `StateStore` 协议，集群侧断点续跑未实现。
 - **本地 vs 集群顺序**：local runner 按依赖拓扑排序，不要求 YAML 书写顺序；编译到 Argo 由 DAG dependencies 保证。
+- **安全边界**：onExit 对账信任对象存储状态对象（部署侧应限制 bucket 写入权限，防止伪造 verified）；
+  `notify_webhook` 仅支持 http/https；`k8s.objstore_env` 不可覆盖框架保留 env；
+  `stage.command` / discover 命令属于 spec 作者代码，视为可信输入。
 - **未验证**：千级 Pod 规模、ReadWriteMany PVC、生产级对象存储吞吐、多副本高可用、gRPC 服务形态。

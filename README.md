@@ -1,7 +1,7 @@
 # specargo
 
 ![unit-tests](https://github.com/1z5/specargo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：82 个离线用例（框架 78 + 领域示例 4），Python 3.11 + 3.12 -->
+<!-- unit-tests：100 个离线用例（框架 96 + 领域示例 4），Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/specargo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一个声明式批量数据管线框架：定义一次，本地可跑，也能编译成 Argo CRD 上集群。**
@@ -19,9 +19,10 @@ CI 的纯净度守卫对它们例外）。仓库自带一个来自真实生产�
 只作为"如何写领域插件"的参考，不是框架主线。
 
 > **边界（说清楚，不含糊）**：编译器覆盖 container 命令 + checks + artifacts +
-> 参数/扇出/检查配置映射，并对编译产物做"零残留模板变量"自检；script 型 template、
-> synchronization、suspend、onExit 尚未映射；集群 gate 只支持单文件 artifact 的跨 Pod 校验。
-> 详见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
+> 参数/扇出/检查配置映射，并对编译产物做"零残留模板变量"自检；集群侧另有**可选的
+> 状态日志 + onExit 对账**（`k8s.journal: true` 开启）。script 型 template、
+> synchronization、suspend 尚未映射；集群 gate 只支持单文件 artifact 的跨 Pod 校验；
+> 集群侧断点续跑（skip）仍未映射。详见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
 
 设计来自我在真实内容生产环境做批量 TTS/ASR 管线的经验：先有领域管线，再把可复用的部分
 剥成框架。领域实现没有删除，而是归档为 `examples/tts-asr/`，用来对照"框架契约 vs 领域知识"的边界。
@@ -68,7 +69,7 @@ YAML spec ─► spec.py 解析/校验 ─► runner.py 本地执行 ─► chec
 | 质量校验 | `checks.py` 插件注册表 + 4 个通用检查（`file_nonempty` / `json_schema` / `row_count` / `command`）；领域检查通过 `plugins:` 注入 |
 | 对账 | expected vs actual：按 dataset / variant 分组对账，漏数 / 未过检即非零退出码 |
 | 结果登记 | item 级状态表（`pipeline_run` / `pipeline_item`），run_id 贯穿日志与产物 |
-| 告警 | 示例层用 `onExit` 收口（`examples/tts-asr/notify_tts.py`）；编译产物尚未映射 onExit |
+| 告警 | 本地 runner 收口输出；集群侧可用编译生成的 `onExit` 对账 + webhook（`k8s.journal: true`，复用 `notify.py`） |
 
 ## 能力矩阵
 
@@ -78,7 +79,8 @@ YAML spec ─► spec.py 解析/校验 ─► runner.py 本地执行 ─► chec
 | **可靠性与恢复** | 框架级断点续跑（有质量闸门的 stage 只认 `verified`，无闸门的 `generated` 即终态）、`resume.py` 输入 sha256 指纹、`retryStrategy` 分层（瞬时错误才重试）、`dependencies` 阻断级联 |
 | **常驻处理服务** | `service.py`：标准库 HTTP 常驻服务，`/healthz` `/readyz`、`/process` 同步、`/tasks` 异步、`POST /tasks/{id}/retry`、Processor 扩展点（当前仅内置 `echo` 示例）、SIGTERM 四步优雅停机 |
 | **数据质量** | `checks.py` 插件注册表（4 个通用检查）+ `spec.plugins` 显式加载领域检查；本地 runner 与集群 gate 共用同一套检查实现 |
-| **状态与追溯** | `state.py`：`pipeline_run` / `pipeline_item` 表，(dataset, partition, variant, stage) 四元组主键 + run_id；旧库（`tts_*` 表）启动时原地迁移 |
+| **状态与追溯** | 本地：`state.py` 的 `pipeline_run` / `pipeline_item` 表（四元组主键 + run_id，旧库原地迁移）；集群：`journal.py` 把状态写成对象存储 key（`runs/<run>/_status/...`），不同 Pod 并发写不依赖共享盘 |
+| **集群侧收口（可选）** | `k8s.journal: true` 时编译产物自动加：每个 stage/gate 结束写状态、discover 写分区清单、`onExit` 调 `pipeline_cli.py reconcile-journal` 对账（差异非空则工作流失败）+ webhook 告警 |
 | **插件机制** | `plugins.py`：spec 顶层 `plugins: [模块名]`，按 spec 目录 / 父目录定位模块后 `importlib` 加载；加载失败启动期报 `SpecError`；框架**不 import** 领域代码 |
 | **可观测性** | `metrics.py` Prometheus text 格式指标（执行数 / 耗时分布 / 积压 / 对账缺失 / inflight；`stage_progress` 已定义但当前未接线） |
 | **存储抽象** | `artifacts.py` 对象存储契约 + 本地目录 / S3 兼容双实现，key 目录穿越防护；`objstore.py` 是集群内 put/get CLI；跨 Pod 走路径契约 `runs/<run_id>/<partition>/<stage>.<ext>` |
@@ -109,7 +111,7 @@ mkdir -p /tmp/compiled
 python3 app/spec2argo.py pipelines/etl-demo.yaml -o /tmp/compiled/etl-demo.yaml
 argo lint --offline /tmp/compiled/etl-demo.yaml
 
-# 4) 离线测试：82 例（框架 78 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
+# 4) 离线测试：100 例（框架 96 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
 for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 
 # 5) 集群冒烟（CI 自动跑；也可手动触发）
@@ -145,9 +147,35 @@ name: tts-example
 plugins: ["checks_tts"]      # 加载 examples/tts-asr/checks_tts.py，注册 asr_three_state 检查
 ```
 
+## 集群侧语义（可选开启）
+
+同一份 spec 在集群侧默认只做"编排 + 质量闸门"（CI 就这么跑）。如果部署环境提供
+对象存储且需要和本地一致的收口语义，在 spec 里开启 journal：
+
+```yaml
+k8s:
+  journal: true          # 开启状态日志 + onExit 对账
+  notify_webhook: ""     # 可选：onExit 对账结果发送到钉钉/飞书/Slack
+  objstore_env: {OBJSTORE_BUCKET: argo-artifacts}   # 可选：对象存储连接参数
+```
+
+编译产物会多出三类行为（全部复用框架同一套实现）：
+
+1. **状态登记**：每个 stage 完成后 `pipeline_cli.py state put-remote` 把一个 JSON 写到
+   `runs/<run_id>/_status/<stage>/<hash>.json`；gate 通过后覆盖为 `verified`。
+2. **分区清单**：discover 类型管线的 discover 任务把分区清单写到
+   `runs/<run_id>/_run/partitions.json`；list/range 类型在编译期直接内嵌。
+3. **onExit 对账**：`pipeline_cli.py reconcile-journal` 读取状态日志，用与本地 runner
+   **同一个** `evaluate_items()` 判定 expected vs actual；有漏数/未过检就让工作流失败，
+   可选发送 webhook。分区清单缺失时的策略：**工作流已失败**才跳过对账（不掩盖原失败）；
+   **成功路径**却缺清单会直接失败（无法证明数据完整，防止假绿）。
+
+> 集群侧**断点续跑（skip）**尚未实现——Argo 的 retry/重跑仍会重新执行 task；
+> 状态日志目前只用于 onExit 对账，不作为 resume 依据（见 ROADMAP）。
+
 ## 已验证 / 未验证
 
-**已验证（82 个离线用例 = 框架 78 + 领域示例 4，+ 集群 E2E）**：
+**已验证（100 个离线用例 = 框架 96 + 领域示例 4，+ 集群 E2E）**：
 
 - 框架 `tests/test_framework.py`（32 例）：spec 解析与严格校验、四类通用检查、runner 断点跳过 /
   依赖阻断 / 重试 / attempt 计数、对账按 variant 分组抓假绿、`spec2argo` 编译产物结构 /
@@ -158,9 +186,12 @@ plugins: ["checks_tts"]      # 加载 examples/tts-asr/checks_tts.py，注册 as
   带 `--state-db` 时 readyz 与状态落库、异步任务全生命周期、暂停期拒新任务、
   SIGTERM 优雅退出（退出码 0）、retry 用原始 payload；metrics 格式与原子落盘；
   objstore 本地 / 目录往返、目录穿越拒绝、CLI 退出码、S3 前缀语义
-- P0 回归 `tests/test_p0_regressions.py`（24 例）：把审计中实测到的静默失败 / 假绿固化为断言
+- P0 回归 `tests/test_p0_regressions.py`（27 例）：把审计中实测到的静默失败 / 假绿固化为断言
   （spec 写错必须报错、无质量闸门 stage 的 resume 与对账、编译产物的参数 / 扇出 / 检查配置、
   集群 gate 取数走对象存储）；完整清单见 [`docs/ROADMAP.md`](docs/ROADMAP.md)「P0 修复」
+- 集群侧语义 `tests/test_cluster_semantics.py`（15 例）：gate CLI（内置/领域插件）、
+  SQLite/对象存储状态登记、journal 对账 CLI（PASS/FAIL 与退出码）、编译产物
+  onExit/状态写入结构、**按 Pod 语义端到端模拟**（stage → gate → onExit；缺数时 onExit 失败）
 - 领域示例 `examples/tts-asr/tests/test_tts_state.py`（4 例）：书籍口径 ↔ 通用状态表映射、
   领域对账、重复产物检测（不装 openai / faster-whisper）
 - E2E（本地）：ETL 管线全链路对账全绿、二次跑全部 resume-skip；dataset-build 全链路通过
@@ -168,7 +199,8 @@ plugins: ["checks_tts"]      # 加载 examples/tts-asr/checks_tts.py，注册 as
   etl-demo 与 dataset-build 的编译产物均跑通
 - 编译产物门禁：CI 对全部编译产物断言"零残留模板变量"（`{{params.*}}` / `{{partition.*}}`）
 - CI：`unit-tests` 在 Python 3.11 / 3.12 上跑全部离线套件 + 框架纯净度守卫；
-  `k8s-smoke` 在 kind 多节点 + Argo Workflows v3.7.18 上提交 `spec2argo` 编译产物
+  `k8s-smoke` 在 kind 多节点 + Argo Workflows v3.7.18 上提交 `spec2argo` 编译产物，
+  并额外跑一次 `journal: true` 变体验证 onExit 对账（真实集群）
 
 **已在真实集群跑通（kind 1 控制面 + 2 worker + Argo v3.7.18，CI 每次 push 自动验证）**。
 以下为一次 CI run 的实测输出：
@@ -191,27 +223,29 @@ Pod 分布到的节点数: 2              # 实际分布 17 + 14；CI 断言只�
 | **质量闸门** | 每个 stage 后跟一个 `gate-<stage>` 任务，先 `objstore get` 再跑 `checks.py` 插件 | 不过检则 task 失败（`limit: 0` 不重试） |
 | **一份定义两个目标** | `spec2argo` 把 `pipelines/etl-demo.yaml` 编译成 Argo CRD，CI 提交编译产物 | 本地 runner 与集群不再各写一份 |
 | **重试分层** | extract `limit 2 / OnTransientError`；transform、load `limit 0`；gate 同样 `limit 0` | 语义按失败类型区分（编译产物里没有独立的 `validate` 阶段） |
-| **onExit 收口** | 历史手写版 `k8s/workflow-etl-smoke.yaml`（CI 已不提交该文件）无论成败都上传 `run.done` | 收口对象在 bucket 内；编译产物尚未生成 onExit |
+| **onExit 收口（可选）** | `k8s.journal: true` 的 spec 编译后生成 `onExit`：从对象存储状态日志对账，差异非空则工作流失败；成功路径缺分区清单也失败 | 本地按 Pod 语义模拟通过；**CI 额外提交 journal=on 变体做真实集群冒烟**（断言 onExit 节点成功 + 状态日志/分区清单落盘） |
 
 **仍未实测**：千级 Pod 规模的 controller 限流与积压、ReadWriteMany PVC、
 生产级 MinIO/OSS 的真实吞吐、多副本高可用、gRPC 服务形态。
-**未映射**：集群侧的 state 落库 / 对账 / onExit、script 型 template、synchronization、suspend。
+**未映射**：集群侧断点续跑（skip）、script 型 template、synchronization、suspend；`onExit` 默认关闭，需 `k8s.journal: true` 显式开启。
 
 ### 已知边界（P0 修复确认，细节见 ROADMAP）
 
 - 集群 gate 只支持**单文件** artifact 的跨 Pod 校验；目录 / 多产物 artifact 不支持。
 - 分区 key / dataset / variant 限定为 `^(?!\.+$)[\w.-]+$`；含空格 / 引号 / `$` 的值会被拒绝。
 - 参数值按**文本替换**注入命令：值里的 shell 元字符会被目标 shell 二次解释。
-- gate 的检查配置 / 产物路径内嵌进 Python 源码执行：路径含反斜杠 / 换行 / 单引号时失败
-  （后续改为从 env/argv 读取）。
+- gate 已改为调用 `pipeline_cli.py gate`（不再内嵌 Python 源码）；其行为在本地可单测。
+- 集群 journal 依赖对象存储可写；SQLite 状态表仍只用于本地，集群多写者场景未提供 StateStore 协议。
 - local runner 按依赖拓扑排序执行，不要求 YAML 里 stages 的书写顺序是拓扑序。
+- **安全边界**：onExit 对账信任对象存储里的状态对象（能写 bucket 的进程可伪造 `verified`，部署侧应用 ACL/最小权限）；`notify_webhook` 仅允许 http/https；`k8s.objstore_env` 不得覆盖框架保留变量（`PIPELINE_RUN_ID` / `OBJSTORE_ENDPOINT` 等）；spec 的 `stage.command`/`discover` 命令本身就是代码，视为作者可信输入。
 
 ## Argo Workflows 编排（框架侧）
 
 编译产物：`spec2argo` 把 spec 编译成 Workflow CRD，覆盖 DAG / `withParam` 扇出、
 `retryStrategy`、`timeout` / `activeDeadlineSeconds`、`gate-<stage>` 质量闸门、
 artifacts 的对象存储路径契约（上游 put、下游 get，key 一致），
-以及 `{{workflow.parameters.*}}` 参数注入。
+以及 `{{workflow.parameters.*}}` 参数注入。开启 `k8s.journal` 时额外生成
+`onExit` 模板（状态日志对账）与状态写入步骤，见上文「集群侧语义」。
 
 ```bash
 # 本地编译 + lint（无需集群，argo CLI 需自行安装）
@@ -320,7 +354,7 @@ examples/tts-asr/         领域插件示例（TTS 生成 + ASR 回检 + 对账�
 pipelines/                通用管线定义（dataset-build.yaml / etl-demo.yaml）
 k8s/                      CI 基础设施（object-store / artifact-repository / 历史 smoke）
 docs/                     架构（ARCHITECTURE.md）与计划（ROADMAP.md）
-tests/                    离线测试（框架 78 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
+tests/                    离线测试（框架 96 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
 Dockerfile                通用 CI 镜像（moto S3 + app/）
 ```
 
