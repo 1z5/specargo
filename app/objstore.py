@@ -9,8 +9,8 @@
 
 契约：
     runs/<run_id>/<partition>/<stage>.<ext>
-    - run_id     批次标识（TTS_RUN_ID / ARGO_RUN_ID）
-    - partition  分区键（章节号 / 日期 / 文件名）
+    - run_id     批次标识（PIPELINE_RUN_ID，由编排层注入）
+    - partition  分区键（日期 / 分片号 / 文件名）
     - stage      阶段名（raw / clean / marker）
 
 用法：

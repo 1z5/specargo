@@ -2,17 +2,16 @@
 
 相对原版的变化：
     1. **skip_existing**（默认开）：逐文件判断能否跳过，实现断点续跑；
-    2. **run_id**：环境变量 ``TTS_RUN_ID`` 注入（Argo 里用 ``{{workflow.name}}``），
-       全程贯穿日志与状态表，实现"哪次跑、谁触发"的追溯；
-    3. **状态登记**：每个 item 生成后写入 tts_item（见 state.py），
+    2. **run_id**：环境变量 ``PIPELINE_RUN_ID`` 注入（Argo 里用 ``{{workflow.name}}``；
+       旧前缀 ``TTS_RUN_ID`` 仍兼容读取），全程贯穿日志与状态表，实现追溯；
+    3. **状态登记**：每个 item 生成后写入框架状态表（见 ``domain_state.py``），
        跑完即可对账，不靠人翻目录；
-    4. **单书 CLI**：``python pipeline.py --book <slug> --voice <voice>``，
-       供 Argo 的每个 task 调用（一个 Pod 只干一本书，失败影响面最小）。
-
-原有 API（generate_book / generate_single_json / generate_from_dir /
-generate_test_phase / generate_production_phase）保持不变，main.py 可直接用。
+    4. **单书 CLI**：``python pipeline.py --book <json> --voice <voice>``，
+       供编排层每个 task 调用（一个 Pod 只干一本书，失败影响面最小）。
 """
 from __future__ import annotations
+
+import _bootstrap  # noqa: F401  (把仓库 app/ 加入 sys.path)
 
 import argparse
 import os
@@ -22,17 +21,17 @@ import uuid
 from pathlib import Path
 
 from config import Config, config as default_config
+from domain_state import upsert_tts_item
+from envcompat import LEGACY_RUN_ID, LEGACY_STATE_DB, getenv
 from models import Book
 from book_reader import read_book, find_book_json_files
 from resume import skip_reason
-from state import GENERATED, VERIFIED, connect, open_run, upsert_item
+from state import GENERATED, VERIFIED, connect, open_run
 from text_composer import compose_opening, compose_chapter, compose_closing
-from tts_client import TTSClient
-from edge_tts_client import EdgeTTSClient
 
 
 def new_run_id() -> str:
-    return os.getenv("TTS_RUN_ID") or f"local-{uuid.uuid4().hex[:8]}"
+    return getenv("PIPELINE_RUN_ID", LEGACY_RUN_ID) or f"local-{uuid.uuid4().hex[:8]}"
 
 
 class TTSPipeline:
@@ -41,9 +40,12 @@ class TTSPipeline:
         if engine not in ("openai", "edge-tts"):
             raise ValueError(f"未知引擎: {engine} (可选 openai / edge-tts)")
         self.engine = engine
-        self.client = (
-            TTSClient(self.cfg) if engine == "openai" else EdgeTTSClient(self.cfg)
-        )
+        if engine == "openai":
+            from tts_client import TTSClient
+            self.client = TTSClient(self.cfg)
+        else:
+            from edge_tts_client import EdgeTTSClient
+            self.client = EdgeTTSClient(self.cfg)
         self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
         self.run_id = new_run_id()
         engine_label = self.cfg.tts_model if engine == "openai" else "edge-tts"
@@ -55,7 +57,7 @@ class TTSPipeline:
                   status: str, coverage=None, accuracy=None) -> None:
         if state is None:
             return
-        upsert_item(
+        upsert_tts_item(
             state, book_slug=book_slug, chapter_num=chapter_num, voice=voice,
             status=status, run_id=self.run_id, coverage=coverage, accuracy=accuracy,
         )
@@ -163,14 +165,16 @@ def main() -> int:
     parser.add_argument("--engine", default="openai", choices=["openai", "edge-tts"])
     parser.add_argument("--no-skip", action="store_true",
                         help="禁用断点续跑（强制全部重生成）")
-    parser.add_argument("--state-db", default=os.getenv("TTS_STATE_DB", ""),
+    parser.add_argument("--state-db",
+                        default=getenv("PIPELINE_STATE_DB", LEGACY_STATE_DB, ""),
                         help="item 状态库路径（SQLite；不填则不登记）")
     args = parser.parse_args()
 
     cfg = Config.from_env()
     book_path = Path(args.book)
     if not book_path.exists():
-        candidate = cfg.books_dir / f"{args.book}.json"
+        name = args.book if args.book.endswith(".json") else f"{args.book}.json"
+        candidate = cfg.books_dir / name
         if candidate.exists():
             book_path = candidate
 

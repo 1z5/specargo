@@ -6,43 +6,50 @@ Argo 的 executor 会采集业务容器写进以下路径的文件，作为 node
 下游通过 ``{{tasks.<name>.outputs.parameters.<param>}}`` 或
 ``{{tasks.<name>.outputs.artifacts.<art>}}`` 引用。
 
-本地/单机跑同样可用：设 ``TTS_ARGO_OUTPUTS=1`` 即写入（默认目录可被
-``TTS_ARGO_OUTPUT_DIR`` 覆盖），便于离线验证"工作流契约"而不需要集群。
+本地/单机跑同样可用：设 ``PIPELINE_ARGO_OUTPUTS=1`` 即写入（默认目录可被
+``PIPELINE_ARGO_OUTPUT_DIR`` 覆盖），便于离线验证"工作流契约"而不需要集群。
+旧前缀（见 ``envcompat.py``）仍兼容读取一个版本。
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
+from envcompat import (LEGACY_ARGO_ARTIFACT_DIR, LEGACY_ARGO_OUTPUT_DIR,
+                       LEGACY_ARGO_OUTPUTS, LEGACY_ARGO_PARAM_DIR, getenv)
+
 DEFAULT_PARAM_DIR = Path("/argo/outputs/parameters")
 DEFAULT_ARTIFACT_DIR = Path("/argo/outputs/artifacts")
 
 
 def _base_dir() -> Path:
-    """输出根目录优先级：TTS_ARGO_OUTPUT_DIR > TTS_ARGO_PARAM_DIR 的父目录 > /argo/outputs。
+    """输出根目录优先级：PIPELINE_ARGO_OUTPUT_DIR > PARAM_DIR 的父目录 > /argo/outputs。
 
-    这样本地联调时只设 TTS_ARGO_PARAM_DIR 也能让 artifacts 落到同一棵树，
+    这样本地联调时只设 PIPELINE_ARGO_PARAM_DIR 也能让 artifacts 落到同一棵树，
     不会误写到只读的 /argo。
     """
-    if os.getenv("TTS_ARGO_OUTPUT_DIR"):
-        return Path(os.environ["TTS_ARGO_OUTPUT_DIR"])
-    if os.getenv("TTS_ARGO_PARAM_DIR"):
-        return Path(os.environ["TTS_ARGO_PARAM_DIR"]).parent
+    output_dir = getenv("PIPELINE_ARGO_OUTPUT_DIR", LEGACY_ARGO_OUTPUT_DIR)
+    if output_dir:
+        return Path(output_dir)
+    param_dir_value = getenv("PIPELINE_ARGO_PARAM_DIR", LEGACY_ARGO_PARAM_DIR)
+    if param_dir_value:
+        return Path(param_dir_value).parent
     return Path("/argo/outputs")
 
 
 def argo_enabled() -> bool:
     """在 Argo Pod 内（/argo 存在）或显式开启时启用。"""
-    return Path("/argo").exists() or os.getenv("TTS_ARGO_OUTPUTS") == "1"
+    return Path("/argo").exists() or getenv(
+        "PIPELINE_ARGO_OUTPUTS", LEGACY_ARGO_OUTPUTS) == "1"
 
 
 def param_dir() -> Path:
-    override = os.getenv("TTS_ARGO_PARAM_DIR")
+    override = getenv("PIPELINE_ARGO_PARAM_DIR", LEGACY_ARGO_PARAM_DIR)
     return Path(override) if override else _base_dir() / "parameters"
 
 
 def artifact_dir() -> Path:
-    override = os.getenv("TTS_ARGO_ARTIFACT_DIR")
+    override = getenv("PIPELINE_ARGO_ARTIFACT_DIR", LEGACY_ARGO_ARTIFACT_DIR)
     return Path(override) if override else _base_dir() / "artifacts"
 
 

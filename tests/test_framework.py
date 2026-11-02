@@ -8,8 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from spec import Partition, PipelineSpec, Stage, RetryPolicy, build_context, load_spec, parse_duration, render  # noqa: E402
-from checks import available, run_check  # noqa: E402
-import checks_tts  # noqa: E402,F401  注册领域检查
+from checks import CheckResult, available, register, run_check  # noqa: E402
 from runner import Runner  # noqa: E402
 import state as st  # noqa: E402
 
@@ -28,8 +27,8 @@ def test_parse_duration():
 
 
 def test_render_supports_dotted_paths():
-    ctx = {"partition": {"key": "book_a", "variant": "cedar"}, "params": {"n": 3}}
-    assert render("out/{{partition.key}}_{{partition.variant}}.jsonl", ctx) == "out/book_a_cedar.jsonl"
+    ctx = {"partition": {"key": "p1", "variant": "v1"}, "params": {"n": 3}}
+    assert render("out/{{partition.key}}_{{partition.variant}}.jsonl", ctx) == "out/p1_v1.jsonl"
     assert render("limit={{params.n}}", ctx) == "limit=3"
 
 
@@ -79,18 +78,17 @@ def test_load_spec_etl_demo():
     assert "json_schema" in spec.stages[1].checks
 
 
-def test_load_spec_tts():
-    spec = load_spec("pipelines/tts.yaml")
-    assert spec.name == "tts"
-    assert len(spec.partitions) == 2
-    assert spec.partitions[0].variant == "cedar"
-    assert spec.stages[1].checks == ["asr_three_state"]
-
-
-def test_domain_check_registered_but_framework_agnostic():
-    """框架内置检查不含领域知识；ASR 检查由插件注入。"""
+def test_domain_plugins_are_not_imported_by_framework():
+    """框架不 import 领域插件；领域检查只能通过 spec.plugins 显式加载。"""
     assert "json_schema" in available() and "row_count" in available()
-    assert "asr_three_state" in available(), "领域检查通过插件注册"
+    # 框架模块 import 完不应带着领域检查（领域插件在 examples/ 下，由 plugins 显式加载）
+    assert "asr_three_state" not in available(), "框架层不应反向 import 领域插件"
+
+    @register("test_only_check")
+    def _test_only(artifact, config, ctx):
+        return CheckResult(True, metric="ok")
+
+    assert "test_only_check" in available()
 
 
 # ---------------- 通用检查 ----------------
@@ -260,16 +258,16 @@ def test_runner_dependency_blocks_downstream():
 
 
 def test_reconcile_groups_by_variant():
-    """多 variant 必须分组对账：A 音色缺章不能被 B 音色掩盖（假绿回归）。"""
+    """多 variant 必须分组对账：A variant 缺的条目不能被 B variant 的记录掩盖（假绿回归）。"""
     with tempfile.TemporaryDirectory() as d:
         conn = st.connect(Path(d) / "state.db")
         expected = [("ds", "0", "male"), ("ds", "1", "male"),
                     ("ds", "0", "female"), ("ds", "1", "female")]
         # 只登记 female 的全部 + male 的 0（male 缺 1）
         for k in ("0", "1"):
-            st.upsert_generic_item(conn, dataset="ds", partition=k, variant="female",
+            st.upsert_item(conn, dataset="ds", partition=k, variant="female",
                                    status=st.VERIFIED, stage="verify")
-        st.upsert_generic_item(conn, dataset="ds", partition="0", variant="male",
+        st.upsert_item(conn, dataset="ds", partition="0", variant="male",
                                status=st.VERIFIED, stage="verify")
 
         r = st.reconcile_generic(conn, "ds", expected, final_stage="verify")
@@ -279,7 +277,7 @@ def test_reconcile_groups_by_variant():
         assert r["ok"] is False
 
         # 补齐 male:1 后应通过
-        st.upsert_generic_item(conn, dataset="ds", partition="1", variant="male",
+        st.upsert_item(conn, dataset="ds", partition="1", variant="male",
                                status=st.VERIFIED, stage="verify")
         r2 = st.reconcile_generic(conn, "ds", expected, final_stage="verify")
         assert r2["ok"] is True and r2["verified"] == 4, r2
@@ -290,7 +288,7 @@ def test_reconcile_single_variant_unchanged():
     with tempfile.TemporaryDirectory() as d:
         conn = st.connect(Path(d) / "state.db")
         expected = [("ds", "0", ""), ("ds", "1", "")]
-        st.upsert_generic_item(conn, dataset="ds", partition="0", variant="",
+        st.upsert_item(conn, dataset="ds", partition="0", variant="",
                                status=st.VERIFIED, stage="load")
         r = st.reconcile_generic(conn, "ds", expected, final_stage="load")
         assert r["missing"] == ["1"] and r["ok"] is False, r
@@ -376,8 +374,8 @@ def test_compile_wires_object_store_contract():
     assert "objstore.py put" in transform_script and "clean.jsonl" in transform_script
 
     # 上下游 key 必须一致（否则下游取不到上游产物）
-    assert 'runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl' in extract_script
-    assert 'runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl' in transform_script
+    assert 'runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl' in extract_script
+    assert 'runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl' in transform_script
 
     # 产物路径翻到集群挂载点，不能用相对路径
     assert "/output/" in transform_script

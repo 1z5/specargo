@@ -1,11 +1,11 @@
 name: unit-tests
 
 # 离线测试：不需要集群、不需要 API key、不需要 Docker。
-# 与 k8s-smoke 互补——smoke 验证集群编排，本 job 守护代码正确性
-#（此前 32+ 个用例只在本地手动跑，改坏 state.py 的 SQL 集群冒烟依然是绿的）。
+# 与 k8s-smoke 互补——smoke 验证集群编排，本 job 守护代码正确性。
 on:
   push:
-    paths: ["app/**", "pipelines/**", "tests/**", ".github/workflows/unit-tests.yml"]
+    paths: ["app/**", "examples/**", "pipelines/**", "tests/**", "k8s/**",
+            "Dockerfile", ".github/workflows/unit-tests.yml"]
   pull_request:
   workflow_dispatch:
 
@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.11 是常见生产下限；3.12 与 Dockerfile / Dockerfile.ci 保持一致
+        # 3.11 是常见生产下限；3.12 与 Dockerfile 保持一致
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
@@ -25,28 +25,50 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # 只装编排层依赖：测试不需要 openai / faster-whisper 这些重依赖
-      # （tts_client 的 openai 导入是延迟的，service/runner/spec/state/checks 全部可离线导入）
+      # 只装框架层依赖：测试不需要领域示例的重依赖（openai / faster-whisper 等，
+      # 它们都在 examples/ 下且导入是延迟的）
       - name: 安装依赖
         run: |
           set -e
           python3 -m pip install --upgrade pip
           python3 -m pip install "PyYAML>=6.0"
 
-      - name: 校验无隐式依赖（import 全部 app 模块）
+      - name: 框架层纯净度守卫（领域词不得泄漏到 app/）
+        run: |
+          set -e
+          # envcompat.py / legacy_state_migration.py 是唯一的旧前缀兼容层，允许例外。
+          MATCHES=$(grep -rniE '(^|[^A-Za-z0-9])(tts|asr|audiobook|narration|book_slug|voice|audio|openai)([^A-Za-z0-9]|$)|音色|书籍|章节|语音|音频' app/ --exclude-dir='__pycache__' \
+            | grep -vE 'app/(envcompat|legacy_state_migration)\.py' || true)
+          if [ -n "$MATCHES" ]; then
+            echo "❌ 框架层出现领域残留（应放到 examples/）："
+            echo "$MATCHES"
+            exit 1
+          fi
+          echo "✅ app/ 无领域词泄漏"
+
+      - name: 校验无隐式依赖（import 全部框架模块）
         run: |
           set -e
           cd app
-          for m in spec runner state checks checks_tts resume metrics argo_io objstore \
-                   summary notify spec2argo artifacts manifest dataset_steps etl_steps; do
+          for m in spec runner state checks resume metrics argo_io objstore spec2argo \
+                   artifacts manifest dataset_steps etl_steps plugins envcompat \
+                   legacy_state_migration; do
             python3 -c "import $m" || { echo "❌ $m 导入失败（缺依赖？）"; exit 1; }
           done
-          echo "✅ 全部模块可离线导入"
+          echo "✅ 全部框架模块可离线导入"
 
-      - name: 跑离线测试（全部套件）
+      - name: 跑框架离线测试（全部套件）
         run: |
           set -e
           for f in tests/test_*.py; do
+            echo "=========== $f ==========="
+            python3 "$f"
+          done
+
+      - name: 跑领域示例离线测试（不装重依赖）
+        run: |
+          set -e
+          for f in examples/tts-asr/tests/test_*.py; do
             echo "=========== $f ==========="
             python3 "$f"
           done
@@ -55,16 +77,27 @@ jobs:
         run: |
           set -e
           cd app
-          for f in ../pipelines/*.yaml; do
+          for f in ../pipelines/*.yaml ../examples/tts-asr/pipelines/*.yaml; do
             echo "--- $f ---"
             python3 -c "
           import sys
           sys.path.insert(0, '.')
           from spec import load_spec
           s = load_spec('$f')
-          print(f'  ✓ {s.name}: {len(s.stages)} stages, {len(s.partitions)} partitions')
+          print(f'  ✓ {s.name}: {len(s.stages)} stages, {len(s.partitions)} partitions, {len(s.plugins)} plugins')
           "
           done
+
+      - name: 插件显式加载（领域示例）
+        run: |
+          set -e
+          cd examples/tts-asr
+          python3 -c "
+          import _bootstrap, checks_tts
+          from checks import available
+          assert 'asr_three_state' in available(), '领域插件未注册'
+          print('✅ 领域插件通过 spec.plugins 显式加载')
+          "
 
       - name: runner 真跑一次真实 pipeline（不能只 dry-run）
         run: |
@@ -95,7 +128,7 @@ jobs:
         run: |
           set -e
           mkdir -p /tmp/compiled
-          for f in pipelines/*.yaml; do
+          for f in pipelines/*.yaml examples/tts-asr/pipelines/*.yaml; do
             echo "--- 编译 $f ---"
             python3 app/spec2argo.py "$f" -o "/tmp/compiled/$(basename "$f")"
           done
@@ -118,7 +151,7 @@ jobs:
             "https://github.com/argoproj/argo-workflows/releases/download/${ARGO_VERSION}/argo-linux-amd64.gz"
           gunzip -f /tmp/argo.gz
           chmod +x /tmp/argo
-          for f in k8s/*.yaml /tmp/compiled/*.yaml; do
+          for f in k8s/*.yaml examples/tts-asr/k8s/*.yaml /tmp/compiled/*.yaml; do
             # object-store / artifact-repository 是原生 K8s 资源，argo lint 不认识，跳过
             case "$f" in
               *object-store.yaml|*artifact-repository.yaml) continue ;;

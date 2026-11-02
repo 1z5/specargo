@@ -1,7 +1,7 @@
-"""ETL demo 的三个步骤（供 pipelines/etl-demo.yaml 调用）。
+"""ETL 示例管线的三个步骤（供 pipelines/etl-demo.yaml 调用）。
 
-存在的意义是**证明框架普适性**：这段代码没有任何 TTS/ASR 知识，
-却能和 TTS 管线共用同一个 runner、同一套断点续跑/状态登记/质量闸门/对账。
+存在的意义是**证明框架普适性**：这段代码只有通用 ETL 逻辑，
+却和其他领域示例共用同一个 runner、同一套断点续跑/状态登记/质量闸门/对账。
 """
 from __future__ import annotations
 

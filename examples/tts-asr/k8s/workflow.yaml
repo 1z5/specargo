@@ -2,7 +2,7 @@
 # 这是 TTS 管线的 Argo 版本，用于说明 stage/依赖/重试/artifact 的写法。
 # 它引用 registry.example.com 镜像与 tts-state/output/books 三个 PVC，
 # 需要自备镜像与存储才能跑；CI 只对它做 argo lint schema 校验。
-# 已在集群实测的版本见 k8s/workflow-etl-smoke.yaml。
+# 已在集群实测的框架侧版本见 ../../k8s/workflow-etl-smoke.yaml。
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata:
@@ -108,18 +108,18 @@ spec:
       - name: voice
       - name: run-id
     container:
-      image: registry.example.com/data/tts:v1
+      image: registry.example.com/specargo/tts-asr:v1
       command:
       - python
-      - pipeline.py
+      - /app/examples/tts-asr/pipeline.py
       args:
       - --book={{inputs.parameters.slug}}.json
       - --voice={{inputs.parameters.voice}}
       env:
-      - name: TTS_RUN_ID
+      - name: PIPELINE_RUN_ID
         value: '{{inputs.parameters.run-id}}'
-      - name: TTS_STATE_DB
-        value: /state/tts_state.db
+      - name: PIPELINE_STATE_DB
+        value: /state/pipeline.db
       - name: TTS_OUTPUT_DIR
         value: /output
       - name: TTS_BOOKS_DIR
@@ -158,17 +158,17 @@ spec:
       - name: voice
       - name: run-id
     container:
-      image: registry.example.com/data/tts:v1
+      image: registry.example.com/specargo/tts-asr:v1
       command:
       - python
-      - verify_audio.py
+      - /app/examples/tts-asr/verify_audio.py
       args:
       - /output/{{inputs.parameters.slug}}
       - --run-id={{inputs.parameters.run-id}}
-      - --state-db=/state/tts_state.db
+      - --state-db=/state/pipeline.db
       - --min-accuracy=0.90
       env:
-      - name: TTS_RUN_ID
+      - name: PIPELINE_RUN_ID
         value: '{{inputs.parameters.run-id}}'
       - name: TTS_OUTPUT_DIR
         value: /output
@@ -206,18 +206,18 @@ spec:
       - name: voice
       - name: run-id
     container:
-      image: registry.example.com/data/tts:v1
+      image: registry.example.com/specargo/tts-asr:v1
       command:
       - python
-      - verify_audio.py
+      - /app/examples/tts-asr/verify_audio.py
       args:
       - /output/{{inputs.parameters.slug}}
       - --fix
       - --fix-retries=3
       - --run-id={{inputs.parameters.run-id}}
-      - --state-db=/state/tts_state.db
+      - --state-db=/state/pipeline.db
       env:
-      - name: TTS_RUN_ID
+      - name: PIPELINE_RUN_ID
         value: '{{inputs.parameters.run-id}}'
       - name: OPENAI_API_KEY
         valueFrom:
@@ -243,12 +243,12 @@ spec:
       - name: voice
       - name: run-id
     container:
-      image: registry.example.com/data/tts:v1
+      image: registry.example.com/specargo/tts-asr:v1
       command:
       - python
-      - summary.py
+      - /app/examples/tts-asr/summary.py
       args:
-      - --state-db=/state/tts_state.db
+      - --state-db=/state/pipeline.db
       - --books=/books/{{inputs.parameters.slug}}.json
       - --voice={{inputs.parameters.voice}}
       - --run-id={{inputs.parameters.run-id}}
@@ -273,15 +273,15 @@ spec:
           path: /argo/outputs/parameters/missing
   - name: on-exit
     container:
-      image: registry.example.com/data/tts:v1
+      image: registry.example.com/specargo/tts-asr:v1
       command:
       - python
-      - notify.py
+      - /app/examples/tts-asr/notify_tts.py
       args:
       - --run-id={{workflow.parameters.run-id}}
       env:
-      - name: TTS_STATE_DB
-        value: /state/tts_state.db
+      - name: PIPELINE_STATE_DB
+        value: /state/pipeline.db
       volumeMounts:
       - name: state
         mountPath: /state

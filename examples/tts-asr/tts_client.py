@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  (把仓库 app/ 加入 sys.path)
+
 import os
 import time
 from pathlib import Path

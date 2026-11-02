@@ -45,9 +45,11 @@ try:
 except Exception:                                     # pragma: no cover
     _metrics = None
 try:
-    from state import FAILED, GENERATED, VERIFIED, connect, upsert_generic_item
+    from state import FAILED, GENERATED, VERIFIED, connect, upsert_item
 except Exception:                                     # pragma: no cover
     connect = None
+
+from envcompat import LEGACY_STATE_DB, getenv
 
 VERSION = os.getenv("SERVICE_VERSION", "dev")
 
@@ -182,7 +184,7 @@ class Service:
             if self.state is not None and connect:
                 try:
                     with self._state_lock:
-                        upsert_generic_item(
+                        upsert_item(
                             self.state, dataset="service", partition=job_id, variant="",
                             status=job["status"], run_id=job_id, stage=self.processor.name)
                 except Exception as exc:        # 不能再静默：写库失败会让 readyz 失真
@@ -361,7 +363,8 @@ def main() -> int:
     parser.add_argument("--endpoint-delay", type=float,
                         default=float(os.getenv("SERVICE_ENDPOINT_DELAY", "2")),
                         help="摘流量后等待 Endpoints 传播的秒数（等价 K8s preStop sleep）")
-    parser.add_argument("--state-db", default=os.getenv("TTS_STATE_DB", ""))
+    parser.add_argument("--state-db",
+                        default=getenv("PIPELINE_STATE_DB", LEGACY_STATE_DB, ""))
     parser.add_argument("--processor", default="echo", choices=["echo"])
     args = parser.parse_args()
 

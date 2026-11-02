@@ -27,6 +27,8 @@
 """
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  (把仓库 app/ 加入 sys.path)
+
 import argparse
 import os
 import shutil
@@ -40,9 +42,11 @@ from tts_verify.reporter import (
 )
 from tts_verify.sentence_matcher import find_sentence_results, missing_only, unsure_only
 
-# 改造新增：item 级状态登记 + Argo 输出参数
-from state import FAILED, VERIFIED, close_run, connect, open_run, upsert_item
+# item 级状态登记 + Argo 输出参数（框架层）
 from argo_io import write_params
+from domain_state import upsert_tts_item
+from envcompat import LEGACY_RUN_ID, LEGACY_STATE_DB, getenv
+from state import FAILED, VERIFIED, close_run, connect, open_run
 
 
 def parse_item_from_path(audio: Path) -> tuple[str, str, str]:
@@ -249,9 +253,10 @@ def main() -> int:
     parser.add_argument("--report-dir", type=Path, default=Path("verify_report"),
                         help="报告输出目录 (默认 <目标所在目录>/verify_report)")
     # --- 改造新增：与 Argo / 状态库对接 ---
-    parser.add_argument("--run-id", default=os.getenv("TTS_RUN_ID", ""),
+    parser.add_argument("--run-id", default=getenv("PIPELINE_RUN_ID", LEGACY_RUN_ID, ""),
                         help="批次 ID (Argo 里传 {{workflow.name}}，用于追溯)")
-    parser.add_argument("--state-db", default=os.getenv("TTS_STATE_DB", ""),
+    parser.add_argument("--state-db",
+                        default=getenv("PIPELINE_STATE_DB", LEGACY_STATE_DB, ""),
                         help="item 状态库路径 (SQLite；不填则不登记)")
     args = parser.parse_args()
 
@@ -349,7 +354,7 @@ def main() -> int:
         # --- 改造新增：item 级结果登记（PASS/WARN 都算过检；FAIL 隔离待处理）---
         if state is not None and result.status != SKIPPED:
             slug, num, voice = parse_item_from_path(audio)
-            upsert_item(
+            upsert_tts_item(
                 state, book_slug=slug, chapter_num=num, voice=voice,
                 status=VERIFIED if result.status in (PASS, WARN) else FAILED,
                 run_id=run_id, coverage=result.coverage, accuracy=result.accuracy,

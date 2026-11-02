@@ -1,0 +1,67 @@
+# TTS 领域示例管线（examples/tts-asr 的声明式定义）
+#
+# 这是**领域插件示例**，不是框架主线：
+#   - 领域能力（ASR 三态判定）通过 plugins 显式加载，框架不 import 本目录任何代码
+#   - 需要自备 OPENAI_API_KEY 与 examples/tts-asr/requirements.txt 里的重依赖
+#   - 集群版本见 ../k8s/（手写 Argo YAML，演示 onExit/semaphore/PVC 等原生特性）
+#
+# 本地运行（在仓库根目录）:
+#   python3 app/runner.py examples/tts-asr/pipelines/tts.yaml \
+#     --state-db /tmp/tts-state.db --workdir "$PWD/examples/tts-asr" \
+#     -p example_dir="$PWD/examples/tts-asr"
+name: tts-example
+description: 批量 TTS 生成 + ASR 回检（领域插件示例，需外部 key/依赖）
+
+plugins: [checks_tts]      # 显式加载领域检查插件（框架不反向依赖）
+
+# 集群执行目标（spec2argo 读取）：领域镜像 + 插件模块在镜像内的路径。
+# 镜像按 examples/tts-asr/Dockerfile 构建；编译出的 gate 会加载 plugins。
+k8s:
+  image: specargo-tts-asr:latest
+  image_pull_policy: IfNotPresent
+  plugin_path: /app/examples/tts-asr
+
+params:
+  python: python3          # 解释器可配置：容器里可能是 python
+  state_db: ""             # 由 CLI 注入；空则只跑不登记
+  books_dir: "data"        # 相对 example_dir 的书籍 JSON 目录
+  example_dir: ""          # 示例代码目录；本地运行时用 -p example_dir=$(pwd)/examples/tts-asr 注入
+  run_id: ""               # 由 Runner 注入（集群侧是 {{workflow.name}}），YAML 不赋值
+  app_dir: ""              # 由 Runner 注入（框架代码目录）
+
+partitions:
+  from: list
+  items:
+    - {dataset: book_example, key: book_example}
+
+variants: ["cedar"]        # 音色
+
+stages:
+  # ---- 生成：瞬时错误才重试（限流/网络/5xx）----
+  - name: generate
+    command: "{{params.python}} {{params.example_dir}}/pipeline.py --book {{params.example_dir}}/{{params.books_dir}}/{{partition.key}}.json --voice {{partition.variant}} --state-db \"{{params.state_db}}\""
+    inputs: [partition]
+    outputs: [audio]
+    artifacts:
+      audio: "output/{{partition.key}}"
+    retry:
+      policy: OnTransientError
+      limit: 3
+      backoff: {duration: 1m, factor: 2, max_duration: 10m}
+    timeout: 30m
+
+  # ---- 校验：数据问题不重试（limit 0），不过检即阻断 ----
+  - name: verify
+    command: "{{params.python}} {{params.example_dir}}/verify_audio.py output/{{partition.key}} --run-id \"{{params.run_id}}\" --state-db \"{{params.state_db}}\""
+    dependencies: [generate]
+    outputs: [report]
+    artifacts:
+      report: "output/{{partition.key}}/verify_report/report.json"
+    checks: [asr_three_state]
+    check_config:
+      asr_three_state:
+        target: "output/{{partition.key}}"
+        min_accuracy: 0.90
+    retry:
+      limit: 0
+    timeout: 20m

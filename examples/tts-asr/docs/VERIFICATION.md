@@ -1,5 +1,8 @@
 # 校验机制：句子级漏读三态判定
 
+> 本文属于 [`examples/tts-asr`](../README.md) 领域示例：讲的是 **TTS/ASR 领域**的校验方法，
+> 不属于框架通用机制。框架的架构与插件机制见 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md)。
+
 本文解释校验端的工作原理、指标定义与防漏读的工程建议。
 **只讲方法与阈值标定过程，不含任何真实业务数据。**
 
@@ -89,3 +92,16 @@ TTS 模型对长文本（数百词/章）存在**静默截断**现象：API 正�
 - **自动修复**：`--fix` 对 FAIL 文件按原文重新生成并复检，
   覆盖原文件前先备份，复检仍失败则回滚
 - **存量自愈**：只有调用日志的旧音频，自动补写 `.input.txt` 便于后续精确对比
+
+## 8. 与框架的接线
+
+本示例把三态判定包装成框架可加载的质量检查，而不是把校验逻辑写进流水线命令里：
+
+- `../checks_tts.py` 用 `@register("asr_three_state")` 把三态判定注册进框架的 checks 注册表；
+- `../pipelines/tts.yaml` 顶层声明 `plugins: ["checks_tts"]`，框架（`app/plugins.py`）按
+  spec 目录 / 父目录加载该模块，`verify` stage 的 `checks: [asr_three_state]` 才能解析；
+- `check_config` 传入 `target` 与 `min_accuracy`，本地 runner 与集群 `gate-verify` 任务
+  跑的是同一份检查实现；
+- 退出码语义（0 = 无确证漏读，1 = 存在 FAIL）同时用于本地 CLI 与 gate 判定，
+  保证"本地绿 = 集群绿"。
+

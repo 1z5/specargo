@@ -86,11 +86,11 @@ def test_artifact_store_directory_upload():
         store = LocalArtifactStore(Path(d) / "art")
         src = Path(d) / "out"; (src / "sub").mkdir(parents=True)
         (src / "a.mp3").write_bytes(b"1"); (src / "sub" / "b.mp3").write_bytes(b"2")
-        store.put(src, "run-1/audio")
-        assert store.exists("run-1/audio/a.mp3")
-        assert store.exists("run-1/audio/sub/b.mp3")
+        store.put(src, "run-1/objects")
+        assert store.exists("run-1/objects/a.mp3")
+        assert store.exists("run-1/objects/sub/b.mp3")
         dest = Path(d) / "restore"
-        store.get("run-1/audio", dest)
+        store.get("run-1/objects", dest)
         assert (dest / "sub" / "b.mp3").read_bytes() == b"2"
 
 
@@ -300,7 +300,7 @@ def test_service_with_state_db_is_ready_and_persists_items():
             import sqlite3
             conn = sqlite3.connect(str(db))
             rows = conn.execute(
-                "SELECT status FROM tts_item WHERE chapter_num=?", (job_id,)).fetchall()
+                "SELECT status FROM pipeline_item WHERE partition=?", (job_id,)).fetchall()
             conn.close()
             assert rows, "任务状态没有写入状态库（跨线程写库失败被吞？）"
             assert rows[0][0] in ("verified", "generated"), rows

@@ -1,33 +1,37 @@
 """声明式管线定义：把"编排"从代码里搬进 YAML。
 
-原实现的三个领域耦合点（普适性障碍）：
-    1. ``state.py`` 的 item key 硬编码为 (book_slug, chapter_num, voice)
-    2. ``pipeline.py`` 的编排写死成 opening/各章/closing 四段
-    3. ``verify_audio.py`` 的质量判定是 ASR 专用
+设计目标：一次运行 = 若干 **stage** × 若干 **partition**，全部由 YAML 声明，
+同一个执行引擎既能本地跑、也能编译成 Argo Workflows CRD 上集群。
 
-框架化之后：
-    - 一次运行 = 若干 **stage** × 若干 **partition**，全部由 YAML 声明
     - stage 之间用输入输出契约连接（对应 Argo 的 parameters/artifacts）
-    - 质量检查是**插件**（``checks.py`` 注册表），TTS 的 ASR 三态判定只是其中一个
-    - 同一个引擎可以跑 TTS 生成、ETL、抽帧质检——见 ``pipelines/`` 下两个实例
+    - 质量检查是插件（``checks.py`` 注册表 + spec ``plugins`` 显式加载）
+    - 领域知识不进框架：领域示例见 ``examples/``
 
 YAML 形态::
 
-    name: tts
-    partitions: {from: list, items: ["book_a", "book_b"]}
-    variants: ["cedar"]
+    name: etl-demo
+    description: 抽取 → 转换 → 装载
+    params:
+      python: python3
+      state_db: ""
+    partitions:
+      from: discover
+      dataset: dwd_order
+      command: "printf '%s\\n' 1 2 3"
     stages:
-      - name: generate
-        command: "python main.py production {{dataset}}/{{partition}}.json --voice {{variant}}"
-        inputs: [dataset, partition, variant]
-        outputs: [audio]
-        retry: {policy: OnTransientError, limit: 3, backoff: {duration: 1m, factor: 2}}
-        timeout: 30m
-      - name: verify
-        command: "python verify_audio.py output/{{partition}} --state-db {{state_db}}"
-        dependencies: [generate]
-        checks: [asr_three_state]
-        retry: {limit: 0}          # 数据问题不重试
+      - name: extract
+        command: "{{params.python}} {{params.app_dir}}/etl_steps.py extract --partition {{partition.key}} --out {{params.work_dir}}/extract/{{partition.key}}.jsonl"
+        outputs: [raw]
+        artifacts:
+          raw: "{{params.work_dir}}/extract/{{partition.key}}.jsonl"
+        checks: [file_nonempty]
+        retry: {policy: OnTransientError, limit: 2}
+        timeout: 10m
+      - name: load
+        dependencies: [extract]
+        consumes: [raw]
+        command: "..."
+        timeout: 10m
 """
 from __future__ import annotations
 
@@ -101,8 +105,8 @@ class Stage:
 @dataclass
 class Partition:
     dataset: str
-    key: str                          # 分区键：章节号 / 日期 / 文件名
-    variant: str = ""                 # 变体：音色 / 版本 / 环境
+    key: str                          # 分区键：日期 / 分片号 / 文件名
+    variant: str = ""                 # 变体：版本 / 环境 / 模型配置
 
     @property
     def item_key(self) -> tuple[str, str, str]:
@@ -122,6 +126,10 @@ class PipelineSpec:
     # 分区来源：list / range / discover（discover 时由 discover_command 产出）
     partitions_source: str = "list"
     discover_command: str = ""
+    # 显式插件模块（领域能力通过装饰器注册；框架不反向 import 领域代码）
+    plugins: list[str] = field(default_factory=list)
+    # spec 文件路径（插件加载时用于定位同目录/父目录模块）
+    source_path: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +139,8 @@ class PipelineSpec:
 _VAR = re.compile(r"\{\{\s*([a-zA-Z_][\w.]*)\s*\}\}")
 
 # 允许的字段集合：拼错/写错键必须报错，不能静默丢弃（静默丢弃会让整条管线"假绿"）。
-_ALLOWED_TOP = {"name", "description", "params", "partitions", "variants", "stages", "k8s"}
+_ALLOWED_TOP = {"name", "description", "params", "partitions", "variants",
+                "stages", "k8s", "plugins"}
 _ALLOWED_STAGE = {
     "name", "command", "inputs", "outputs", "dependencies", "retry", "timeout",
     "checks", "when", "artifacts", "consumes", "check_config", "resources",
@@ -152,7 +161,8 @@ _PARAM_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 _SAFE_KEY_RE = re.compile(r"^(?!\.+$)[\w.-]+$")
 # k8s 运行时配置的已知字段（拼错就报错，不然会被静默忽略）。
 _ALLOWED_K8S = {"image", "image_pull_policy", "volumes", "mounts",
-                "objstore_endpoint", "service_account", "active_deadline_seconds"}
+                "objstore_endpoint", "service_account", "active_deadline_seconds",
+                "plugin_path"}
 # discover 命令在加载期执行：必须有超时，否则一个挂住的命令会卡死 load_spec。
 _DISCOVER_TIMEOUT_SECONDS = 60
 
@@ -251,6 +261,9 @@ def validate_spec(spec: PipelineSpec, *, path: str | Path = "") -> None:
             raise SpecError(f"{where}: 参数名 {key!r} 非法（只允许字母/数字/下划线）")
     if spec.k8s:
         _reject_unknown_keys(spec.k8s, _ALLOWED_K8S, f"{where}: k8s")
+    for module in spec.plugins:
+        if not isinstance(module, str) or not module.strip():
+            raise SpecError(f"{where}: plugins 元素必须是非空模块名，实际 {module!r}")
     if not spec.stages:
         raise SpecError(f"{where}: stages 不能为空（没有任何 stage 的管线会静默成功）")
     if not spec.partitions:
@@ -440,6 +453,14 @@ def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
     raw_k8s = raw.get("k8s")
     if raw_k8s is not None and not isinstance(raw_k8s, dict):
         raise SpecError(f"{path}: k8s 必须是映射（image/volumes/mounts 等）")
+    raw_plugins = raw.get("plugins")
+    if raw_plugins is None:
+        plugins: list[str] = []
+    else:
+        if not isinstance(raw_plugins, list) or any(
+                not isinstance(item, str) or not item for item in raw_plugins):
+            raise SpecError(f"{path}: plugins 必须是非空字符串列表（模块名，如 my_domain_checks）")
+        plugins = list(raw_plugins)
     raw_variants = raw.get("variants")
     if raw_variants is None:
         variants = [""]
@@ -456,7 +477,7 @@ def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
                 f"{path}: 参数名 {key!r} 非法（只允许字母/数字/下划线，且不以数字开头）"
             )
 
-    # 分区来源：list（显式） / range（1..N，适合章节）/ discover（由命令产出）
+    # 分区来源：list（显式） / range（1..N，适合日期/序号）/ discover（由命令产出）
     part_cfg = raw_partitions
     partitions: list[Partition] = []
     source = part_cfg.get("from", "list")
@@ -587,6 +608,8 @@ def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
         k8s=dict(raw_k8s or {}),
         partitions_source=source,
         discover_command=str(part_cfg.get("command", "")),
+        plugins=plugins,
+        source_path=str(Path(path).resolve()),
     )
 
     # 变量校验：YAML 里用到的 {{params.*}} 必须在 params 里显式声明。

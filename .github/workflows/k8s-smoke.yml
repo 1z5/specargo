@@ -5,7 +5,8 @@ name: k8s-smoke
 # 这一步是为了把"未在真实集群跑过"变成"已在 CI 集群跑通"。
 on:
   push:
-    paths: ["k8s/**", "app/**", "Dockerfile.ci", ".github/workflows/k8s-smoke.yml"]
+    paths: ["k8s/**", "app/**", "pipelines/**", "examples/**", "Dockerfile",
+            ".github/workflows/k8s-smoke.yml"]
   workflow_dispatch:
 
 jobs:
@@ -32,7 +33,7 @@ jobs:
       - name: 启动 kind 集群（1 控制面 + 2 worker）
         uses: helm/kind-action@v1
         with:
-          cluster_name: tts-argo
+          cluster_name: specargo
           node_image: kindest/node:v1.29.0
           wait: 180s
           config: /tmp/kind-config.yaml
@@ -80,12 +81,12 @@ jobs:
       - name: 构建并加载镜像
         run: |
           set -e
-          docker build -f Dockerfile.ci -t tts-argo:ci .
-          kind load docker-image tts-argo:ci --name tts-argo
+          docker build -f Dockerfile -t specargo:ci .
+          kind load docker-image specargo:ci --name specargo
           echo "--- 镜像已加载 ---"
 
       # ---- 3.5 对象存储与 artifact repository（必须在镜像加载之后）----
-      # 对象存储与 artifact repository（复用已加载的 tts-argo:ci 镜像，无外部依赖）
+      # 对象存储与 artifact repository（复用已加载的 specargo:ci 镜像，无外部依赖）
       - name: 部署对象存储与 artifact repository
         run: |
           set -e

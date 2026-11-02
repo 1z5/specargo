@@ -8,6 +8,8 @@ onExit 无论上游成败都执行，所以这里是"绿着但少数据"与"真�
 """
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  (把仓库 app/ 加入 sys.path)
+
 import argparse
 import json
 import os
@@ -15,17 +17,18 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from state import VERIFIED, connect, items_for
+from envcompat import LEGACY_STATE_DB, getenv
+from state import VERIFIED, connect
 
 
 def build_summary(conn, run_id: str) -> dict:
-    rows = conn.execute("SELECT * FROM tts_item WHERE run_id=?", (run_id,)).fetchall()
+    rows = conn.execute("SELECT * FROM pipeline_item WHERE run_id=?", (run_id,)).fetchall()
     by_book: dict[str, dict[str, int]] = {}
     for r in rows:
-        entry = by_book.setdefault(f"{r['book_slug']}[{r['voice']}]",
+        entry = by_book.setdefault(f"{r['dataset']}[{r['variant']}]",
                                    {"verified": 0, "failed": 0, "generated": 0})
         entry[r["status"]] = entry.get(r["status"], 0) + 1
-    run = conn.execute("SELECT * FROM tts_run WHERE run_id=?", (run_id,)).fetchone()
+    run = conn.execute("SELECT * FROM pipeline_run WHERE run_id=?", (run_id,)).fetchone()
     return {
         "run_id": run_id,
         "run_status": run["status"] if run else "unknown",
@@ -62,7 +65,9 @@ def send_webhook(text: str) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description="批次收口通知")
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--state-db", default=os.getenv("TTS_STATE_DB", "/state/tts_state.db"))
+    parser.add_argument("--state-db",
+                        default=getenv("PIPELINE_STATE_DB", LEGACY_STATE_DB,
+                                       "/state/pipeline.db"))
     args = parser.parse_args()
 
     if not Path(args.state_db).exists():

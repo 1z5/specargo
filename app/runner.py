@@ -1,6 +1,6 @@
 """通用 stage 执行器：声明式定义 + 断点续跑 + 质量闸门 + 对账。
 
-这是整个项目"从 TTS 管线升级为批量任务框架"的那一层：
+这是框架的执行层（单机参考实现）：
     - 输入：``PipelineSpec``（YAML）+ 分区清单
     - 对每个 (stage × partition)：跳过判定 → 执行（超时 + 重试）→ 质量检查 → 状态登记
     - 收口：对账（expected vs actual）+ 报告 + Argo 输出参数 + 退出码
@@ -21,8 +21,10 @@ from pathlib import Path
 from checks import CheckResult, run_check
 from metrics import METRICS
 from spec import Partition, PipelineSpec, build_context, parse_duration, render
+from envcompat import LEGACY_RUN_ID, LEGACY_STATE_DB, getenv
+from plugins import load as load_plugins, search_dirs_for as plugin_search_dirs
 from state import (FAILED, GENERATED, VERIFIED, close_run, connect, get_item,
-                   open_run, reconcile_generic, upsert_generic_item)
+                   open_run, reconcile_generic, upsert_item)
 
 
 @dataclass
@@ -69,6 +71,7 @@ class Runner:
         self.result = RunResult()
         self.reconcile_ok = True
         self._execution_stages: list = []
+        self._plugins_loaded = False
         # 代码目录与工作目录分离：workdir 放产物，app_dir 放代码
         # （容器里两者通常都是 /app；本地演练时 workdir 常是临时目录）
         #
@@ -172,11 +175,21 @@ class Runner:
                 )
         return order
 
+    def _load_plugins_once(self) -> None:
+        """按 spec 声明显式加载领域插件（幂等；框架不 import 领域代码）。"""
+        if self._plugins_loaded:
+            return
+        if self.spec.plugins:
+            load_plugins(self.spec.plugins,
+                         search_dirs=plugin_search_dirs(self.spec.source_path))
+        self._plugins_loaded = True
+
     def run(self) -> RunResult:
         spec = self.spec
         if self.state is not None:
             open_run(self.state, self.run_id, note=f"{spec.name}: {len(spec.partitions)} partitions")
         self._execution_stages = self._execution_order()
+        self._load_plugins_once()
 
         for stage in self._execution_stages:
             self._log(f"\n=== stage: {stage.name} ({len(spec.partitions)} partitions) ===")
@@ -292,7 +305,7 @@ class Runner:
     def _register(self, stage, partition: Partition, status: str, attempts: int) -> None:
         if self.state is None:
             return
-        upsert_generic_item(
+        upsert_item(
             self.state, dataset=partition.dataset, partition=partition.key,
             variant=partition.variant, status=status, run_id=self.run_id,
             attempt=attempts, stage=stage.name,
@@ -377,15 +390,16 @@ class Runner:
 
 def main() -> int:
     import argparse
-    import os
 
     from spec import load_spec
 
     parser = argparse.ArgumentParser(description="声明式批量任务执行器")
-    parser.add_argument("spec", help="管线定义 YAML，如 pipelines/tts.yaml")
-    parser.add_argument("--state-db", default=os.getenv("TTS_STATE_DB", ""))
+    parser.add_argument("spec", help="管线定义 YAML，如 pipelines/etl-demo.yaml")
+    parser.add_argument("--state-db",
+                        default=getenv("PIPELINE_STATE_DB", LEGACY_STATE_DB, ""))
     parser.add_argument("--workdir", default=".")
-    parser.add_argument("--run-id", default=os.getenv("TTS_RUN_ID", ""))
+    parser.add_argument("--run-id",
+                        default=getenv("PIPELINE_RUN_ID", LEGACY_RUN_ID, ""))
     parser.add_argument("--dry-run", action="store_true", help="只打印将执行的命令")
     parser.add_argument("--no-resume", action="store_true",
                         help="禁用断点续跑（默认开启：已过检的 stage×partition 会跳过）")

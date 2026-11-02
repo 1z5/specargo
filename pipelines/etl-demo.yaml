@@ -1,5 +1,5 @@
-# 通用 ETL 管线（框架化的第二个实例，证明与 TTS 无关）
-# 没有任何 ASR/TTS 知识：用 schema + row_count 两个通用检查做质量闸门
+# 通用 ETL 管线（框架示例之一）
+# 不含任何领域知识：用 schema + row_count 两个通用检查做质量闸门
 name: etl-demo
 description: 抽取 → 转换 → 校验 → 装载（纯通用，用于验证框架普适性）
 
@@ -12,7 +12,7 @@ params:
 
 # 集群执行目标：spec2argo 编译器读取这一段生成 Argo CRD
 k8s:
-  image: tts-argo:ci
+  image: specargo:ci
   image_pull_policy: Never
   volumes:
     output: {hostPath: {path: /tmp/ci/output, type: DirectoryOrCreate}}

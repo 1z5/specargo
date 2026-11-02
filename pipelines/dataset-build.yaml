@@ -20,7 +20,7 @@ params:
 
 # 集群执行目标：spec2argo 编译器读取这一段生成 Argo CRD
 k8s:
-  image: tts-argo:ci
+  image: specargo:ci
   image_pull_policy: Never
   volumes:
     output: {hostPath: {path: /tmp/ci/output, type: DirectoryOrCreate}}

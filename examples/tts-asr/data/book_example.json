@@ -1,0 +1,28 @@
+{
+  "book_info": {
+    "title": "Example Book",
+    "author": "Example Author",
+    "hook_intro": "This is a tiny synthetic book used only to make the TTS example runnable end to end."
+  },
+  "chapters": [
+    {
+      "chapter_id": 1,
+      "chapter_title": "Why Deterministic Pipelines Matter",
+      "chapter_intro": "A short introduction.",
+      "breakdown": {
+        "point_1": "Same input should produce the same output, run after run.",
+        "point_2": "Silent truncation is the expensive failure mode, so verify independently."
+      }
+    },
+    {
+      "chapter_id": 2,
+      "chapter_title": "Quality Gates",
+      "chapter_intro": "A second short introduction.",
+      "breakdown": {
+        "point_1": "A green exit code does not mean the data is correct.",
+        "point_2": "Make verification a separate, blocking stage."
+      }
+    }
+  ],
+  "outro": "Thanks for listening. This sample exists only for the pipeline example."
+}

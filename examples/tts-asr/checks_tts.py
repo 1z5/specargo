@@ -1,12 +1,14 @@
 """TTS 领域检查插件：把 ASR 三态判定注册成框架的一个 check。
 
-框架（``checks.py``）不包含任何 ASR 知识；领域知识通过注册表注入。
-这样同一套 runner 既能跑 TTS 管线，也能跑 ETL / 视频管线。
+框架（``checks.py``）不包含任何领域知识；本插件通过 spec 的
+``plugins: [checks_tts]`` 显式加载后注册，方向是 examples -> framework。
 
 本插件只是**适配层**：真正判定逻辑仍在 ``verify_audio.py`` / ``tts_verify/``，
 通过 command 检查（退出码 0/1）接入——保持"生成层不校验、校验层不生成"的分层。
 """
 from __future__ import annotations
+
+import _bootstrap  # noqa: F401  (把仓库 app/ 加入 sys.path)
 
 from pathlib import Path
 

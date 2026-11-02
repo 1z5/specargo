@@ -1,15 +1,14 @@
 """质量检查插件注册表：把"怎么算合格"变成可插拔。
 
-原实现的耦合点：``verify_audio.py`` 里写死了 ASR 三态判定。
-框架化之后，检查是插件——同一个引擎可以给 TTS 挂 ASR 检查、
-给 ETL 挂 schema/行数检查、给视频管线挂 ffprobe 检查。
+质量检查是插件：框架只提供通用检查与注册表，领域检查由 spec 的
+``plugins: [模块名]`` 显式加载（框架不反向 import 领域代码）。
 
-内置三个**通用**检查（不含任何领域知识）：
+内置四个**通用**检查（不含任何领域知识）：
     file_nonempty  产物存在且非空
     json_schema    JSON 必填字段（config: {required: [...]}）
     row_count      行数等于期望或在区间内（config: {expect: N} / {min: A, max: B}）
     command        执行 shell 命令，非零即失败——领域检查的逃生口
-                   （TTS 的 ASR 三态判定就通过它接入，框架不需要知道 ASR 是什么）
+                   （需要领域逻辑但不想写 Python 插件时，用它挂外部命令）
 
 自定义检查::
 
@@ -132,7 +131,8 @@ def _command(artifact: Path, config: dict, ctx: dict) -> CheckResult:
     """领域检查的逃生口：跑一条 shell 命令，非零退出码即不合格。
 
     命令里可用 {{artifact}} / {{params.*}} / {{partition.*}} 占位。
-    TTS 的 ASR 三态判定就是这样接入的——框架本身不包含任何 ASR 知识。
+    领域专用检查也可以走插件注册表（``@register``），二者共用同一套
+    gate 执行语义。
     """
     from spec import render
 
@@ -150,9 +150,4 @@ def _command(artifact: Path, config: dict, ctx: dict) -> CheckResult:
                        detail=(proc.stdout or "") + (proc.stderr or ""))
 
 
-# 领域检查在各自模块里注册（避免框架依赖领域代码）：
-#   app/checks_tts.py -> @register("asr_three_state")
-try:  # pragma: no cover - 仅在 TTS 实例存在时生效
-    import checks_tts  # noqa: F401
-except Exception:
-    pass
+# 领域检查由 spec 的 plugins 显式加载（见 plugins.py），框架不 import 任何领域模块。

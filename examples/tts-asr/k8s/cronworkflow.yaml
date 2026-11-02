@@ -104,18 +104,18 @@ spec:
         - name: voice
         - name: run-id
       container:
-        image: registry.example.com/data/tts:v1
+        image: registry.example.com/specargo/tts-asr:v1
         command:
         - python
-        - pipeline.py
+        - /app/examples/tts-asr/pipeline.py
         args:
         - --book={{inputs.parameters.slug}}.json
         - --voice={{inputs.parameters.voice}}
         env:
-        - name: TTS_RUN_ID
+        - name: PIPELINE_RUN_ID
           value: '{{inputs.parameters.run-id}}'
-        - name: TTS_STATE_DB
-          value: /state/tts_state.db
+        - name: PIPELINE_STATE_DB
+          value: /state/pipeline.db
         - name: TTS_OUTPUT_DIR
           value: /output
         - name: TTS_BOOKS_DIR
@@ -151,16 +151,16 @@ spec:
         - name: voice
         - name: run-id
       container:
-        image: registry.example.com/data/tts:v1
+        image: registry.example.com/specargo/tts-asr:v1
         command:
         - python
-        - verify_audio.py
+        - /app/examples/tts-asr/verify_audio.py
         args:
         - /output/{{inputs.parameters.slug}}
         - --run-id={{inputs.parameters.run-id}}
-        - --state-db=/state/tts_state.db
+        - --state-db=/state/pipeline.db
         env:
-        - name: TTS_RUN_ID
+        - name: PIPELINE_RUN_ID
           value: '{{inputs.parameters.run-id}}'
         - name: TTS_OUTPUT_DIR
           value: /output
@@ -192,17 +192,17 @@ spec:
         - name: voice
         - name: run-id
       container:
-        image: registry.example.com/data/tts:v1
+        image: registry.example.com/specargo/tts-asr:v1
         command:
         - python
-        - verify_audio.py
+        - /app/examples/tts-asr/verify_audio.py
         args:
         - /output/{{inputs.parameters.slug}}
         - --fix
         - --run-id={{inputs.parameters.run-id}}
-        - --state-db=/state/tts_state.db
+        - --state-db=/state/pipeline.db
         env:
-        - name: TTS_RUN_ID
+        - name: PIPELINE_RUN_ID
           value: '{{inputs.parameters.run-id}}'
         - name: OPENAI_API_KEY
           valueFrom:
@@ -223,15 +223,15 @@ spec:
             memory: 4Gi
     - name: on-exit
       container:
-        image: registry.example.com/data/tts:v1
+        image: registry.example.com/specargo/tts-asr:v1
         command:
         - python
-        - notify.py
+        - /app/examples/tts-asr/notify_tts.py
         args:
         - --run-id={{workflow.parameters.run-id}}
         env:
-        - name: TTS_STATE_DB
-          value: /state/tts_state.db
+        - name: PIPELINE_STATE_DB
+          value: /state/pipeline.db
         volumeMounts:
         - name: state
           mountPath: /state

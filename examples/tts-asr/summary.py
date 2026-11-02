@@ -10,14 +10,18 @@
 """
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  (把仓库 app/ 加入 sys.path)
+
 import argparse
 import os
 import sys
 from pathlib import Path
 
-from book_reader import read_book
-from state import FAILED, GENERATED, VERIFIED, close_run, connect, items_for, reconcile, scan_duplicate_files
 from argo_io import publish_artifact, write_params
+from book_reader import read_book
+from domain_state import reconcile, scan_duplicate_files
+from envcompat import LEGACY_RUN_ID, getenv
+from state import close_run, connect
 
 
 def summarize_book(conn, book_path: Path, voice: str) -> dict:
@@ -65,7 +69,7 @@ def main() -> int:
     parser.add_argument("--books", nargs="+", required=True,
                         help="本次批次的书籍 JSON 路径（可多个）")
     parser.add_argument("--voice", required=True)
-    parser.add_argument("--run-id", default=os.getenv("TTS_RUN_ID", ""))
+    parser.add_argument("--run-id", default=getenv("PIPELINE_RUN_ID", LEGACY_RUN_ID, ""))
     parser.add_argument("--report", default="", help="Markdown 报告输出路径")
     args = parser.parse_args()
 

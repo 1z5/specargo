@@ -124,7 +124,7 @@ def _artifact_key(artifact_name: str) -> str:
     上下游只约定 key 怎么算，不依赖编排器的 artifact 配对行为；
     run_id 用容器环境变量展开（由编译产物注入，不硬编码值）。
     """
-    return 'runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/%s' % _ext(artifact_name)
+    return 'runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/%s' % _ext(artifact_name)
 
 
 def _objstore_put_snippet(artifacts: dict[str, str]) -> str:
@@ -219,6 +219,26 @@ def _resolve_for_gate(value, *, spec: PipelineSpec, artifact_path: str):
     return value
 
 
+def _gate_env(spec: PipelineSpec, objstore_endpoint: str) -> list[dict]:
+    """gate 容器的环境变量：run_id / 对象存储端点 / 领域插件声明。
+
+    领域插件在本地 runner 与集群 gate 必须走同一条加载路径，否则
+    "本地过检、集群报未注册检查"——这是归档后最容易踩的语义漂移。
+    插件模块需在镜像内，路径由 spec 的 k8s.plugin_path 指定。
+    """
+    env = [
+        {"name": "PIPELINE_RUN_ID", "value": "{{workflow.name}}"},
+        {"name": "OBJSTORE_ENDPOINT", "value": objstore_endpoint},
+    ]
+    if spec.plugins:
+        env.append({"name": "PIPELINE_PLUGINS",
+                    "value": json.dumps(spec.plugins, ensure_ascii=False)})
+        plugin_path = (spec.k8s or {}).get("plugin_path", "")
+        if plugin_path:
+            env.append({"name": "PIPELINE_PLUGIN_PATH", "value": str(plugin_path)})
+    return env
+
+
 def _gate_snippet(stage: Stage, spec: PipelineSpec) -> str:
     """质量闸门：独立 Pod 先按路径契约把产物取回来，再跑 checks.py 插件。
 
@@ -243,9 +263,14 @@ def _gate_snippet(stage: Stage, spec: PipelineSpec) -> str:
         + json.dumps(cfg, ensure_ascii=False, indent=0)
         + "\nJSON\n"
         "python3 - <<'PY'\n"
-        "import json, sys\n"
+        "import json, os, sys\n"
         "sys.path.insert(0, '/app')\n"
         "from pathlib import Path\n"
+        "from plugins import load as _load_plugins\n"
+        "_mods = json.loads(os.environ.get('PIPELINE_PLUGINS', '[]'))\n"
+        "if _mods:\n"
+        "    _dirs = [p for p in [os.environ.get('PIPELINE_PLUGIN_PATH', '')] if p]\n"
+        "    _load_plugins(_mods, search_dirs=_dirs)\n"
         "from checks import run_check\n"
         "cfg = json.load(open('/tmp/gate_config.json', encoding='utf-8'))\n"
         "failed = []\n"
@@ -371,7 +396,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
             "command": ["sh", "-c"],
             "args": [script],
             "env": [
-                {"name": "TTS_RUN_ID", "value": "{{workflow.name}}"},
+                {"name": "PIPELINE_RUN_ID", "value": "{{workflow.name}}"},
                 {"name": "OBJSTORE_ENDPOINT", "value": objstore_endpoint},
             ],
         }
@@ -410,10 +435,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
                 "imagePullPolicy": pull_policy,
                 "command": ["sh", "-c"],
                 "args": [_gate_snippet(stage, spec)],
-                "env": [
-                    {"name": "TTS_RUN_ID", "value": "{{workflow.name}}"},
-                    {"name": "OBJSTORE_ENDPOINT", "value": objstore_endpoint},
-                ],
+                "env": _gate_env(spec, objstore_endpoint),
             }
             if volume_mounts:
                 gate_container["volumeMounts"] = volume_mounts

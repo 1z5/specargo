@@ -1,0 +1,18 @@
+# examples/tts-asr 领域示例依赖（需要外部 API key / 本地模型）
+#
+# 框架层只需要 PyYAML（见仓库根 app/requirements.txt）；本文件是示例专属依赖。
+# 安装：python3 -m pip install -r examples/tts-asr/requirements.txt
+
+# 生成端（OpenAI TTS API）
+openai>=1.0.0
+
+# 校验端：音频转文字（漏读检测），CPU 上 int8 量化即可流畅运行
+faster-whisper>=1.0.0
+
+# 可选 TTS 引擎（与 OpenAI 对比测试用，见 docs/VERIFICATION.md）
+# edge-tts: 微软免费神经网络语音，无需 API key，经实测不漏读（推荐）
+edge-tts>=7.0.0
+# kokoro: 开源本地模型（需 torch，体积大；首次运行下载模型 ~300MB）
+# kokoro>=0.9.0
+# soundfile: kokoro 生成 wav 所需
+# soundfile>=0.14.0

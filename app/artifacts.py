@@ -12,10 +12,10 @@
     # Argo 侧配置示例（S3 兼容）
     artifactRepository:
       s3:
-        bucket: tts-artifacts
+        bucket: pipeline-artifacts
         endpoint: minio.data-platform:9000
-        accessKeySecret: {name: tts-secrets, key: ak}
-        secretKeySecret: {name: tts-secrets, key: sk}
+        accessKeySecret: {name: pipeline-secrets, key: ak}
+        secretKeySecret: {name: pipeline-secrets, key: sk}
         keyFormat: "{{workflow.name}}/{{pod.name}}/{{artifact.name}}"
 
 S3 实现默认不启用（依赖 boto3）；本地实现零依赖，供单机演练与测试。

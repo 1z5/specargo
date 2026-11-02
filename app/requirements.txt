@@ -1,17 +1,3 @@
-# 编排层：声明式管线定义（spec.py）依赖
+# 框架层依赖：声明式管线定义/执行只用标准库 + YAML 解析。
+# 领域示例的重依赖在 examples/ 各目录的 requirements.txt 中（框架不需要）。
 PyYAML>=6.0
-
-# TTS 生成端 (OpenAI TTS API)
-openai>=1.0.0
-
-# 校验端: 音频转文字 (漏读检测), CPU 上 int8 量化即可流畅运行
-faster-whisper>=1.0.0
-
-# --- 可选 TTS 引擎 (与 OpenAI 对比测试用, 见 docs/VERIFICATION.md 对比结论) ---
-# edge-tts: 微软免费神经网络语音, 无需 API key, 经实测不漏读 (推荐)
-edge-tts>=7.0.0
-# kokoro: 开源本地模型 (需 torch, 体积大; 首次运行下载模型 ~300MB)
-# kokoro>=0.9.0
-# soundfile: kokoro 生成 wav 所需
-# soundfile>=0.14.0
-

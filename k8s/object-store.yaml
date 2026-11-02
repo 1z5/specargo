@@ -32,7 +32,7 @@ spec:
     spec:
       containers:
       - name: moto
-        image: tts-argo:ci
+        image: specargo:ci
         imagePullPolicy: Never            # kind load 进去的本地镜像
         # -H 0.0.0.0 必须显式指定：moto_server 默认只绑 127.0.0.1，
         # 集群内探针和其他 Pod 都连不上（本地实测确认）

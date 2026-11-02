@@ -102,7 +102,7 @@ spec:
       limit: '2'
       retryPolicy: OnTransientError
     script:
-      image: tts-argo:ci
+      image: specargo:ci
       imagePullPolicy: Never            # kind load 进去的本地镜像
       command: [python3]
       source: |
@@ -110,7 +110,7 @@ spec:
         import os
 
         # 发现"待处理分区"：扫描输入目录；生产上可能是查上游表 / 读消息 / 调 API
-        base = os.environ.get("TTS_INPUT_DIR", "/input")
+        base = os.environ.get("PIPELINE_INPUT_DIR", "/input")
         found = []
         if os.path.isdir(base):
             for name in sorted(os.listdir(base)):
@@ -126,7 +126,7 @@ spec:
         with open("/tmp/out/items.json", "w", encoding="utf-8") as f:
             f.write(json.dumps(found))
       env:
-      - name: TTS_INPUT_DIR
+      - name: PIPELINE_INPUT_DIR
         value: /input
       volumeMounts:
       - name: input
@@ -168,7 +168,7 @@ spec:
                 workflows.argoproj.io/workflow: '{{workflow.name}}'
             topologyKey: kubernetes.io/hostname
     container:
-      image: tts-argo:ci
+      image: specargo:ci
       imagePullPolicy: Never
       command: [sh, -c]
       args:
@@ -179,10 +179,10 @@ spec:
           --out /tmp/work/{{inputs.parameters.partition}}.jsonl
         # 路径契约：上游只负责把产物写到约定 key，不依赖编排器的 artifact 配对
         python3 /app/objstore.py put \
-          --key "runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl" \
+          --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl" \
           --file /tmp/work/{{inputs.parameters.partition}}.jsonl
       env:
-      - name: TTS_RUN_ID
+      - name: PIPELINE_RUN_ID
         value: '{{inputs.parameters.run-id}}'
       - name: OBJSTORE_ENDPOINT
         value: 'http://object-store.argo.svc.cluster.local:5000'
@@ -202,23 +202,23 @@ spec:
     retryStrategy:
       limit: '0'
     container:
-      image: tts-argo:ci
+      image: specargo:ci
       imagePullPolicy: Never
       command: [sh, -c]
       args:
       - |
         set -e
         python3 /app/objstore.py get \
-          --key "runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl" \
+          --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl" \
           --file /tmp/in/raw.jsonl
         python3 /app/etl_steps.py transform \
           --in /tmp/in/raw.jsonl \
           --out /tmp/work/{{inputs.parameters.partition}}.jsonl
         python3 /app/objstore.py put \
-          --key "runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/clean.jsonl" \
+          --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/clean.jsonl" \
           --file /tmp/work/{{inputs.parameters.partition}}.jsonl
       env:
-      - name: TTS_RUN_ID
+      - name: PIPELINE_RUN_ID
         value: '{{inputs.parameters.run-id}}'
       - name: OBJSTORE_ENDPOINT
         value: 'http://object-store.argo.svc.cluster.local:5000'
@@ -239,23 +239,23 @@ spec:
       limit: '2'
       retryPolicy: OnTransientError
     container:
-      image: tts-argo:ci
+      image: specargo:ci
       imagePullPolicy: Never
       command: [sh, -c]
       args:
       - |
         set -e
         python3 /app/objstore.py get \
-          --key "runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/clean.jsonl" \
+          --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/clean.jsonl" \
           --file /tmp/in/clean.jsonl
         python3 /app/etl_steps.py load \
           --in /tmp/in/clean.jsonl \
           --out /tmp/work/{{inputs.parameters.partition}}.done
         python3 /app/objstore.py put \
-          --key "runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/marker.done" \
+          --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/marker.done" \
           --file /tmp/work/{{inputs.parameters.partition}}.done
       env:
-      - name: TTS_RUN_ID
+      - name: PIPELINE_RUN_ID
         value: '{{inputs.parameters.run-id}}'
       - name: OBJSTORE_ENDPOINT
         value: 'http://object-store.argo.svc.cluster.local:5000'
@@ -274,14 +274,14 @@ spec:
     retryStrategy:
       limit: '0'                        # 检查失败是数据问题，重试无意义
     container:
-      image: tts-argo:ci
+      image: specargo:ci
       imagePullPolicy: Never
       command: [sh, -c]
       args:
       - |
         set -e
         python3 /app/objstore.py get \
-          --key "runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/clean.jsonl" \
+          --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/clean.jsonl" \
           --file /tmp/in/clean.jsonl
         python3 -c '
         import sys
@@ -295,7 +295,7 @@ spec:
         sys.exit(0 if result.passed else 1)
         '
       env:
-      - name: TTS_RUN_ID
+      - name: PIPELINE_RUN_ID
         value: '{{workflow.parameters.run-id}}'
       - name: OBJSTORE_ENDPOINT
         value: 'http://object-store.argo.svc.cluster.local:5000'
@@ -308,20 +308,20 @@ spec:
   # =====================================================================
   - name: on-exit
     container:
-      image: tts-argo:ci
+      image: specargo:ci
       imagePullPolicy: Never
       command: [sh, -c]
       args:
       - |
         set -e
         mkdir -p /tmp/work
-        printf "run_id=%s finished_at=%s\n" "$TTS_RUN_ID" "$(date +%s)" > /tmp/work/run.done
+        printf "run_id=%s finished_at=%s\n" "$PIPELINE_RUN_ID" "$(date +%s)" > /tmp/work/run.done
         python3 /app/objstore.py put \
-          --key "runs/$TTS_RUN_ID/_run/run.done" \
+          --key "runs/$PIPELINE_RUN_ID/_run/run.done" \
           --file /tmp/work/run.done
         echo "[onExit] 收口完成"
       env:
-      - name: TTS_RUN_ID
+      - name: PIPELINE_RUN_ID
         value: '{{workflow.parameters.run-id}}'
       - name: OBJSTORE_ENDPOINT
         value: 'http://object-store.argo.svc.cluster.local:5000'

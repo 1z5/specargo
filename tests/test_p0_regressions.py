@@ -10,6 +10,8 @@
    check_config 不解析 → tts/dataset-build 的编译产物不可用。
 4. 集群 gate：读节点本地路径、不 objstore get（靠调度恰好同节点才过）。
 
+领域示例相关断言只作为"插件/目录产物"边界，不依赖任何领域模块。
+
 运行方式与其他套件一致（零依赖）：
     python3 tests/test_p0_regressions.py
 """
@@ -158,7 +160,7 @@ def test_checks_stage_still_requires_verified():
     """有 checks 的 stage 不能因为"generated 也算终态"而放松对账。"""
     with tempfile.TemporaryDirectory() as d:
         conn = st.connect(Path(d) / "s.db")
-        st.upsert_generic_item(conn, dataset="ds", partition="1", variant="",
+        st.upsert_item(conn, dataset="ds", partition="1", variant="",
                                status=st.GENERATED, stage="gated")
         recon = st.reconcile_generic(conn, "ds", [("ds", "1", "")],
                                      final_stage="gated")
@@ -243,9 +245,9 @@ def test_compile_gate_fetches_artifact_before_check():
     get_pos = script.find("objstore.py get")
     check_pos = script.find("run_check")
     assert get_pos >= 0 and check_pos > get_pos, script
-    assert "runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl" in script
+    assert "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl" in script
     env = {e["name"]: e["value"] for e in gate["container"]["env"]}
-    assert "TTS_RUN_ID" in env and "OBJSTORE_ENDPOINT" in env
+    assert "PIPELINE_RUN_ID" in env and "OBJSTORE_ENDPOINT" in env
 
 
 def test_compile_resolves_check_config_params():
@@ -292,6 +294,35 @@ def test_compile_quotes_artifact_paths_with_spaces():
     tmpl = next(t for t in wf["spec"]["templates"] if t["name"] == "s1")
     script = tmpl["container"]["args"][0]
     assert "--file 'out dir/{{inputs.parameters.partition}}.txt'" in script, script
+
+
+def test_compile_injects_plugins_into_gate():
+    """spec.plugins 必须在集群 gate 里也被加载（本地/集群语义一致）。
+
+    回归：领域插件从框架移除硬编码 import 后，如果编译器不把 plugins 声明
+    注入 gate，本地 runner 能过检、集群 gate 会报"未注册的检查"。
+    """
+    spec_file = _write_spec(
+        "name: plugingate\n"
+        "k8s: {image: demo:ci, plugin_path: /app/examples/demo}\n"
+        "plugins: [my_domain_checks]\n"
+        "params: {work_dir: out}\n"
+        "partitions: {from: list, items: [{dataset: ds, key: k1}]}\n"
+        "stages:\n"
+        "  - name: s1\n"
+        "    command: \"mkdir -p out && echo x > out/k1.txt\"\n"
+        "    outputs: [o]\n"
+        "    artifacts: {o: \"{{params.work_dir}}/k1.txt\"}\n"
+        "    checks: [file_nonempty]\n"
+    )
+    wf = compile_workflow(load_spec(spec_file))
+    gate = next(t for t in wf["spec"]["templates"] if t["name"] == "gate-s1")
+    env = {e["name"]: e["value"] for e in gate["container"]["env"]}
+    assert json.loads(env["PIPELINE_PLUGINS"]) == ["my_domain_checks"], env
+    assert env["PIPELINE_PLUGIN_PATH"] == "/app/examples/demo", env
+    script = gate["container"]["args"][0]
+    assert "from plugins import load" in script, script
+    assert "PIPELINE_PLUGINS" in script, script
 
 
 def test_compile_gate_declares_dataset_and_variant_inputs():

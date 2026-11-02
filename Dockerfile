@@ -1,22 +1,23 @@
+# 通用镜像：框架层 app/（纯标准库 + PyYAML）+ S3 兼容对象存储服务端。
+#
+# 为什么把对象存储做进镜像：集群冒烟测试需要一个 S3 兼容端点来验证
+# Argo 的 artifact 传递链路。依赖外部镜像（Docker Hub / Quay）会引入
+# 拉取失败的不确定性，所以用 pip 装的 moto server 自建端点——
+# 验证的是 Argo 侧的 artifact 机制，与生产用 MinIO/OSS/S3 走同一套 S3 API。
+#
+# 构建：docker build -f Dockerfile -t specargo:ci .
+# 领域示例镜像见 examples/tts-asr/Dockerfile。
 FROM python:3.12-slim
-
-# faster-whisper 依赖 av（内置 ffmpeg 动态库），无需系统 ffmpeg；
-# 若后续要直接调 ffmpeg CLI（视频抽帧等），取消下一段注释。
-# RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
-#     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 先装依赖（层缓存）：生成端 openai + 校验端 faster-whisper
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 框架依赖（PyYAML）+ moto[server]（S3 兼容 HTTP 服务端，默认端口 5000）
+COPY app/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt "moto[server]"
 
-COPY . .
+COPY app/ /app/
 
-# 默认入口由 Argo template 的 command 覆盖；本地可直接 python pipeline.py --help
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    TTS_OUTPUT_DIR=/output \
-    TTS_BOOKS_DIR=/books
+    PYTHONDONTWRITEBYTECODE=1
 
-CMD ["python", "pipeline.py", "--help"]
+CMD ["python3", "-c", "print('specargo ci image ready')"]
