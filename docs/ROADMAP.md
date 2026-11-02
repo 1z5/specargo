@@ -82,7 +82,7 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 
 - ✅ gate / state / reconcile 已编译为对 `pipeline_cli.py` 的调用，不再内嵌 Python 片段；
 - ✅ 集群侧可选状态日志（`k8s.journal: true`）+ `onExit` 对账 + webhook；
-  ✅ CI kind smoke 额外提交 journal=on 变体，真实集群验证 onExit 节点与状态日志；
+  ✅ CI kind smoke 额外提交 journal=on 变体，**真实集群已通过**（onExit 1/1、对账 PASS、15 状态对象 + 分区清单）；
 - ⬜ 集群侧断点续跑（skip）未实现：需要在 stage 启动时查状态日志并跳过；
 - ⬜ 真实部署的并发/规模验证（对象存储状态日志的对象数随 stage×partition 增长）。
 

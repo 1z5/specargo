@@ -213,6 +213,20 @@ Pod 分布到的节点数: 2              # 实际分布 17 + 14；CI 断言只�
 对象存储中的 artifact 对象数: 15   # 5 分区 × (raw + clean + marker)
 ```
 
+同一 CI job 紧接着还会提交一次 **`journal: true`** 变体（保留 Pod 便于断言），实测：
+
+```
+journal 工作流最终状态: Succeeded
+onExit 节点成功数: 1/1
+批次 etl-demo-journal 对账结果: PASS
+journal 分区数: 5（状态日志 = 3 stage × 5 分区 = 15）
+状态日志对象数: 15
+分区清单对象数: 1
+```
+
+即：真实 Argo 下 `{{workflow.status}}` 注入、跨 Pod 状态日志、onExit 对账与
+PASS/FAIL 传播全部实测通过（bucket 总计 46 个对象 = 15 产物 + 15 状态 + 1 分区清单 + 15 journal 产物）。
+
 集群拓扑与验证点：
 
 | 能力 | 怎么验的 | 结果 |
@@ -223,7 +237,7 @@ Pod 分布到的节点数: 2              # 实际分布 17 + 14；CI 断言只�
 | **质量闸门** | 每个 stage 后跟一个 `gate-<stage>` 任务，先 `objstore get` 再跑 `checks.py` 插件 | 不过检则 task 失败（`limit: 0` 不重试） |
 | **一份定义两个目标** | `spec2argo` 把 `pipelines/etl-demo.yaml` 编译成 Argo CRD，CI 提交编译产物 | 本地 runner 与集群不再各写一份 |
 | **重试分层** | extract `limit 2 / OnTransientError`；transform、load `limit 0`；gate 同样 `limit 0` | 语义按失败类型区分（编译产物里没有独立的 `validate` 阶段） |
-| **onExit 收口（可选）** | `k8s.journal: true` 的 spec 编译后生成 `onExit`：从对象存储状态日志对账，差异非空则工作流失败；成功路径缺分区清单也失败 | 本地按 Pod 语义模拟通过；**CI 额外提交 journal=on 变体做真实集群冒烟**（断言 onExit 节点成功 + 状态日志/分区清单落盘） |
+| **onExit 收口（可选）** | `k8s.journal: true` 的 spec 编译后生成 `onExit`：从对象存储状态日志对账，差异非空则工作流失败；成功路径缺分区清单也失败 | **真实集群 CI 验证**：journal 工作流 Succeeded、onExit 节点 1/1、日志「对账结果: PASS」、15 个状态对象 + 分区清单落盘 |
 
 **仍未实测**：千级 Pod 规模的 controller 限流与积压、ReadWriteMany PVC、
 生产级 MinIO/OSS 的真实吞吐、多副本高可用、gRPC 服务形态。
