@@ -37,17 +37,16 @@ jobs:
         run: |
           set -e
           cd app
-          for m in spec runner state checks checks_tts resume metrics argo_io objstore summary notify; do
+          for m in spec runner state checks checks_tts resume metrics argo_io objstore \
+                   summary notify spec2argo artifacts manifest dataset_steps etl_steps; do
             python3 -c "import $m" || { echo "❌ $m 导入失败（缺依赖？）"; exit 1; }
           done
           echo "✅ 全部模块可离线导入"
 
-      - name: 跑离线测试（三个套件）
+      - name: 跑离线测试（全部套件）
         run: |
           set -e
-          total=0
-          for f in tests/test_framework.py tests/test_resume_state.py \
-                   tests/test_service_and_storage.py; do
+          for f in tests/test_*.py; do
             echo "=========== $f ==========="
             python3 "$f"
           done
@@ -100,6 +99,16 @@ jobs:
             echo "--- 编译 $f ---"
             python3 app/spec2argo.py "$f" -o "/tmp/compiled/$(basename "$f")"
           done
+
+      - name: 断言编译产物无未解析模板变量（argo lint 不检查这个）
+        run: |
+          set -e
+          # 编译器内部已做同一断言；这里作为 CI 层防线，防止断言被误删后回归。
+          if grep -rInE '\{\{[[:space:]]*(params|partition)\.|\{\{artifact\}\}' /tmp/compiled/; then
+            echo "❌ 编译产物残留 spec 模板变量"
+            exit 1
+          fi
+          echo "✅ 编译产物零残留模板变量"
 
       - name: lint 全部 k8s 编排（schema 级校验）
         run: |

@@ -53,6 +53,20 @@ class ArtifactStore(Protocol):
 # 本地实现：目录模拟对象存储（布局与 S3 一致：key 即"路径"）
 # ---------------------------------------------------------------------------
 
+def _normalize_key(key: str) -> str:
+    """artifact key 规范化 + 目录穿越防护。
+
+    本地目录实现与 S3 实现必须共用同一套校验，否则同一个 key 在两种存储上
+    行为不一致（本地拒绝、S3 当字面 key 接受），排障时非常隐蔽。
+    """
+    cleaned = str(key).strip().lstrip("/")
+    if not cleaned:
+        raise ValueError("artifact key 不能为空")
+    if any(seg in ("", ".", "..") for seg in cleaned.split("/")):
+        raise ValueError(f"非法 artifact key: {key}")
+    return cleaned
+
+
 class LocalArtifactStore:
     """零依赖的本地对象存储模拟。
 
@@ -64,13 +78,10 @@ class LocalArtifactStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
-    # -- key 规范化：防目录穿越 --
+    # -- key 规范化：防目录穿越（与 S3 共用同一套规则） --
     @staticmethod
     def _safe_key(key: str) -> str:
-        cleaned = key.strip().lstrip("/")
-        if ".." in cleaned.split("/"):
-            raise ValueError(f"非法 artifact key: {key}")
-        return cleaned
+        return _normalize_key(key)
 
     def _path(self, key: str) -> Path:
         return self.root / self._safe_key(key)
@@ -108,6 +119,8 @@ class LocalArtifactStore:
         return self._path(key).exists()
 
     def list(self, prefix: str = "") -> list[str]:
+        # 前缀允许以 "/" 结尾（调用方常用 "runs/"），先去尾再规范化
+        prefix = prefix.strip().strip("/")
         base = self._path(prefix) if prefix else self.root
         if not base.exists():
             return []
@@ -160,7 +173,8 @@ class S3ArtifactStore:
         self._s3 = boto3.client("s3", endpoint_url=endpoint, **client_kwargs)
 
     def _key(self, key: str) -> str:
-        return f"{self.prefix}/{key.lstrip('/')}" if self.prefix else key.lstrip("/")
+        k = _normalize_key(key)          # 与本地实现同一套穿越/空段校验
+        return f"{self.prefix}/{k}" if self.prefix else k
 
     def put(self, local_path: Path, key: str) -> str:
         src = Path(local_path)
@@ -189,8 +203,24 @@ class S3ArtifactStore:
         except Exception:
             return False
 
+    @staticmethod
+    def _list_prefix(store_prefix: str, prefix: str) -> str:
+        """S3 list 前缀：保留调用方的尾斜杠语义。
+
+        本地实现用目录语义，S3 用字符串前缀语义。若把 ``"runs/r1/"`` 简单去掉
+        尾斜杠，Prefix 会变成 ``runs/r1``，从而 over-match 兄弟前缀
+        ``runs/r10/...``。尾斜杠表示"目录前缀"，必须补回。
+        """
+        raw = str(prefix).strip()
+        core = raw.strip("/")
+        if not core:
+            return f"{store_prefix}/" if store_prefix else ""
+        normalized = _normalize_key(core)
+        full = f"{store_prefix}/{normalized}" if store_prefix else normalized
+        return full + "/" if raw.endswith("/") else full
+
     def list(self, prefix: str = "") -> list[str]:
-        full_prefix = self._key(prefix) if prefix else (self.prefix + "/" if self.prefix else "")
+        full_prefix = self._list_prefix(self.prefix, prefix)
         keys: list[str] = []
         paginator = self._s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=full_prefix):

@@ -41,6 +41,44 @@ def test_artifact_store_rejects_path_traversal():
             raise AssertionError("应拒绝目录穿越")
         except ValueError:
             pass
+        # 任意路径段是 "." / ".." / 空段都拒绝（S3 实现共用同一套校验）
+        for bad in ("runs/dotdot/../o.jsonl", "runs//o.jsonl", "..", "."):
+            try:
+                store.put(Path(d) / "x", bad)
+                raise AssertionError(f"应拒绝非法 key: {bad}")
+            except ValueError:
+                pass
+        import artifacts
+        for bad in ("..", ".", "", "a/../b"):
+            try:
+                artifacts._normalize_key(bad)
+                raise AssertionError(f"_normalize_key 应拒绝: {bad!r}")
+            except ValueError:
+                pass
+
+
+def test_s3_list_prefix_keeps_trailing_slash_semantics():
+    """S3 list 前缀必须保留尾斜杠：否则 "runs/r1/" 会 over-match "runs/r10/"。
+
+    本地实现是目录语义、S3 是字符串前缀语义；两者对"带尾斜杠的目录前缀"
+    必须表现一致。这里直接测前缀构造（S3 构造依赖 boto3，CI 不装）。
+    """
+    from artifacts import S3ArtifactStore
+
+    f = S3ArtifactStore._list_prefix
+    assert f("p", "runs/r1/") == "p/runs/r1/", f("p", "runs/r1/")
+    assert f("p", "runs/r1") == "p/runs/r1"
+    assert f("p", "") == "p/"
+    assert f("", "runs/") == "runs/"
+    assert f("p", "/runs/r2/") == "p/runs/r2/"
+    # 关键断言：目录前缀不应 over-match 兄弟前缀
+    assert not "p/runs/r10/b.jsonl".startswith(f("p", "runs/r1/"))
+    assert "p/runs/r1/a.jsonl".startswith(f("p", "runs/r1/"))
+    try:
+        f("p", "../x/")
+        raise AssertionError("应拒绝目录穿越前缀")
+    except ValueError:
+        pass
 
 
 def test_artifact_store_directory_upload():
@@ -214,6 +252,65 @@ def test_service_lifecycle_probes_tasks_graceful_shutdown():
         out = proc.stdout.read() if proc.stdout else ""
         if "Traceback" in out:
             print(out)
+
+
+def test_service_with_state_db_is_ready_and_persists_items():
+    """带 --state-db 起服务：/readyz 必须 200，任务状态必须真的落库。
+
+    旧实现的 P0：sqlite 连接在主线程创建、被 worker 线程跨线程使用 →
+    /readyz 恒 503、写库异常被 `except: pass` 吞掉（状态表永远 0 行）。
+    现有用例都传 state_db=None，所以 CI 抓不到。
+    """
+    port = _free_port()
+    app_dir = Path(__file__).resolve().parents[1] / "app"
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin",
+           "PYTHONPATH": str(app_dir)}
+    with tempfile.TemporaryDirectory() as d:
+        db = Path(d) / "svc.db"
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "service", "--port", str(port),
+             "--state-db", str(db), "--workers", "2"],
+            cwd=str(app_dir), env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            for _ in range(60):
+                try:
+                    code, body = _get(port, "/readyz")
+                    if code == 200:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.1)
+            else:
+                raise AssertionError("带状态库的服务未在超时内就绪（readyz 恒 503？）")
+            assert code == 200 and body["checks"]["state_db"] == "ok", body
+
+            code, body = _post(port, "/tasks", {"payload": "persist", "delay": 0.02})
+            assert code == 202, body
+            job_id = body["job_id"]
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                code, job = _get(port, f"/tasks/{job_id}")
+                if job["status"] in ("succeeded", "verified", "failed"):
+                    break
+                time.sleep(0.1)
+            assert job["status"] in ("succeeded", "verified"), job
+
+            # 状态必须真的落库（旧实现这里是 0 行）
+            import sqlite3
+            conn = sqlite3.connect(str(db))
+            rows = conn.execute(
+                "SELECT status FROM tts_item WHERE chapter_num=?", (job_id,)).fetchall()
+            conn.close()
+            assert rows, "任务状态没有写入状态库（跨线程写库失败被吞？）"
+            assert rows[0][0] in ("verified", "generated"), rows
+        finally:
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGTERM)
+                try:
+                    proc.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
 
 def test_service_rejects_new_tasks_while_draining():

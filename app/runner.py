@@ -58,6 +58,9 @@ class Runner:
         self.spec = spec
         self.state = connect(state_db) if state_db else None
         self.workdir = Path(workdir)
+        # workdir 是产物根目录，runner 负责创建它：否则新机器上照文档跑第一步就
+        # FileNotFoundError（子进程 cwd 不存在），是很差的首次体验。
+        self.workdir.mkdir(parents=True, exist_ok=True)
         self.run_id = run_id or f"{spec.name}-{int(time.time())}"
         self.dry_run = dry_run
         self.verbose = verbose
@@ -65,6 +68,7 @@ class Runner:
         self.force = force            # 强制全量重跑
         self.result = RunResult()
         self.reconcile_ok = True
+        self._execution_stages: list = []
         # 代码目录与工作目录分离：workdir 放产物，app_dir 放代码
         # （容器里两者通常都是 /app；本地演练时 workdir 常是临时目录）
         #
@@ -144,12 +148,37 @@ class Runner:
         return results
 
     # ------------------------------------------------------------------
+    def _execution_order(self) -> list:
+        """按依赖拓扑排序执行（同层保持声明顺序）。
+
+        不能直接按 YAML 里 stages 的书写顺序执行：写出 [b(依赖a), a] 这种
+        非拓扑序时，旧实现会先跑 b 再跑 a，而 b 的依赖判定此时还没有结果——
+        错序执行却整体绿灯，正是"跑完≠跑对"要防的。
+        """
+        remaining = list(self.spec.stages)
+        installed: list[str] = []
+        order = []
+        while remaining:
+            progressed = False
+            for stage in list(remaining):
+                if all(dep in installed for dep in stage.dependencies):
+                    installed.append(stage.name)
+                    order.append(stage)
+                    remaining.remove(stage)
+                    progressed = True
+            if not progressed:
+                raise RuntimeError(
+                    f"stage 依赖无法拓扑排序（成环或引用不存在）: {[s.name for s in remaining]}"
+                )
+        return order
+
     def run(self) -> RunResult:
         spec = self.spec
         if self.state is not None:
             open_run(self.state, self.run_id, note=f"{spec.name}: {len(spec.partitions)} partitions")
+        self._execution_stages = self._execution_order()
 
-        for stage in spec.stages:
+        for stage in self._execution_stages:
             self._log(f"\n=== stage: {stage.name} ({len(spec.partitions)} partitions) ===")
             for partition in spec.partitions:
                 tag = f"{partition.dataset}/{partition.key}/{partition.variant or '-'}"
@@ -164,12 +193,14 @@ class Runner:
                         StageRun(stage.name, tag, "skipped", detail=f"blocked by {blocked_by}"))
                     continue
 
-                # 断点续跑：上一轮已 verified 的 (stage × partition) 直接跳过。
+                # 断点续跑：上一轮已到"成功终态"的 (stage × partition) 直接跳过。
                 # 判据放在框架层而不是任务层——否则每条管线都要自己实现一遍。
-                if self.resume and not self.force and self._already_verified(stage, partition):
-                    self._log("      [resume] 上轮已过检，跳过")
+                # 终态定义：配了 checks 的 stage 只认 verified；没配 checks 的 stage
+                # 成功执行后的 generated 就是终态（否则它永远无法 resume）。
+                if self.resume and not self.force and self._already_completed(stage, partition):
+                    self._log("      [resume] 上轮已到终态，跳过")
                     self.result.runs.append(
-                        StageRun(stage.name, tag, "skipped", detail="already verified"))
+                        StageRun(stage.name, tag, "skipped", detail="already completed"))
                     continue
 
                 if self.dry_run:
@@ -216,12 +247,22 @@ class Runner:
         return self.result
 
     # ------------------------------------------------------------------
-    def _already_verified(self, stage, partition: Partition) -> bool:
+    @staticmethod
+    def _stage_terminal_statuses(stage) -> tuple[str, ...]:
+        """stage 的成功终态：配了质量闸门只认 verified，否则 generated 即终态。
+
+        这个定义同时用于 resume 跳过与最终对账。若统一只认 verified，
+        "没配 checks 的 stage"将永远无法 resume、且管线永远对账失败——
+        等于框架隐性强制每条管线每个 stage 都必须配质量闸门。
+        """
+        return (VERIFIED,) if stage.checks else (GENERATED, VERIFIED)
+
+    def _already_completed(self, stage, partition: Partition) -> bool:
         if self.state is None:
             return False
         row = get_item(self.state, partition.dataset, partition.key,
                        partition.variant, stage=stage.name)
-        return row is not None and row["status"] == VERIFIED
+        return row is not None and row["status"] in self._stage_terminal_statuses(stage)
 
     def _blocking_dependency(self, stage, partition: Partition) -> str | None:
         """返回阻断本 stage 的上游 stage 名；无阻断返回 None。
@@ -232,8 +273,13 @@ class Runner:
         for dep in stage.dependencies:
             prior = [r for r in self.result.runs if r.stage == dep and r.partition == tag]
             if prior:
-                # 只有"失败"才阻断；resume 跳过（already verified）不等于失败
+                # 失败要阻断；因上游失败而被跳过（blocked）的也要级联阻断，
+                # 否则 a 失败 -> b 被跳过 -> c 照跑，下游成功又一次掩盖上游失败。
+                # resume 跳过（already completed）不代表失败，不算阻断。
                 if any(p.status == FAILED for p in prior):
+                    return dep
+                if any(p.status == "skipped" and p.detail.startswith("blocked by")
+                       for p in prior):
                     return dep
                 continue
             if self.state is not None:
@@ -268,7 +314,13 @@ class Runner:
         self._log(f"汇总: {counts}")
 
         if self.state is not None:
-            final_stage = spec.stages[-1].name if spec.stages else None
+            # "末 stage"按实际执行顺序取，不是 YAML 声明顺序（可能非拓扑序）
+            order = self._execution_stages or spec.stages
+            final_stage_obj = order[-1] if order else None
+            final_stage = final_stage_obj.name if final_stage_obj else None
+            # 末 stage 的可交付终态与 resume 判据保持一致：没配 checks 的 stage 允许 generated。
+            terminal_statuses = (self._stage_terminal_statuses(final_stage_obj)
+                                 if final_stage_obj else (VERIFIED,))
             # ⚠️ 必须按 dataset 分组对账：item 登记的 dataset 是 partition.dataset
             # （如 dwd_order），不是管线名。用管线名会导致 expected=0、假绿——
             # 这个 bug 在 ETL E2E 里真实踩到过。
@@ -279,7 +331,8 @@ class Runner:
             recons = [
                 reconcile_generic(self.state, ds,
                                   [(p.dataset, p.key, p.variant) for p in spec.partitions],
-                                  final_stage=final_stage)
+                                  final_stage=final_stage,
+                                  terminal_statuses=terminal_statuses)
                 for ds in datasets
             ]
             for recon in recons:

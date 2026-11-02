@@ -54,12 +54,30 @@ class RetryPolicy:
     def from_dict(cls, d: dict | None) -> "RetryPolicy":
         d = d or {}
         backoff = d.get("backoff", {}) or {}
+        if not isinstance(backoff, dict):
+            raise ValueError("retry.backoff 必须是映射")
+
+        def _as_int(value, name: str) -> int:
+            # 2.0 这类"整数值的浮点"可以接受；2.5 必须拒绝——int() 静默截断会
+            # 让用户以为配了 2.5 次重试，实际只重试 2 次。
+            if isinstance(value, float) and value.is_integer():
+                value = int(value)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} 必须是整数，实际 {value!r}")
+            return value
+
+        def _as_str(value, name: str) -> str:
+            if not isinstance(value, str):
+                raise ValueError(f"{name} 必须是字符串，实际 {value!r}")
+            return value
+
         return cls(
-            limit=int(d.get("limit", 0)),
-            policy=d.get("policy", "OnFailure"),
-            duration=str(backoff.get("duration", "1m")),
-            factor=int(backoff.get("factor", 2)),
-            max_duration=str(backoff.get("max_duration", "10m")),
+            limit=_as_int(d.get("limit", 0), "retry.limit"),
+            policy=_as_str(d.get("policy", "OnFailure"), "retry.policy"),
+            duration=_as_str(backoff.get("duration", "1m"), "retry.backoff.duration"),
+            factor=_as_int(backoff.get("factor", 2), "retry.backoff.factor"),
+            max_duration=_as_str(backoff.get("max_duration", "10m"),
+                                 "retry.backoff.max_duration"),
         )
 
 
@@ -112,9 +130,35 @@ class PipelineSpec:
 
 _VAR = re.compile(r"\{\{\s*([a-zA-Z_][\w.]*)\s*\}\}")
 
+# 允许的字段集合：拼错/写错键必须报错，不能静默丢弃（静默丢弃会让整条管线"假绿"）。
+_ALLOWED_TOP = {"name", "description", "params", "partitions", "variants", "stages", "k8s"}
+_ALLOWED_STAGE = {
+    "name", "command", "inputs", "outputs", "dependencies", "retry", "timeout",
+    "checks", "when", "artifacts", "consumes", "check_config", "resources",
+}
+_ALLOWED_PARTITIONS = {"from", "items", "start", "end", "dataset", "command"}
+_RETRY_POLICIES = {"Always", "OnFailure", "OnError", "OnTransientError"}
+# 时长必须是"数字+单位"的组合（30m / 1h / 45s / 2h30m）；'30x' 这类拼错不能被
+# parse_duration 宽松放过（它会把无法识别的字符直接忽略，返回 30）。
+_DURATION_RE = re.compile(r"^(?:\d+(?:\.\d+)?[smhd])+$")
+# Argo/K8s 的资源名约束（workflow 名直接用 spec.name；63 是 Pod 名派生上限的安全值）
+_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+_MAX_NAME_LEN = 63
+# 参数名：YAML 模板里用 {{params.x}} 引用，必须是标识符（否则编译期无法翻译）。
+_PARAM_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+# 分区键/数据集/变体会进入文件路径与对象存储 key：只允许 Unicode 字母/数字/_.-
+# （中文分区键可用；引号/空格/$ 等 shell 元字符会破坏脚本与 key，拒绝）。
+# 额外排除纯 "." / ".."（作为路径段可穿越；本地对象存储会拒绝而 S3 不会，必须统一）。
+_SAFE_KEY_RE = re.compile(r"^(?!\.+$)[\w.-]+$")
+# k8s 运行时配置的已知字段（拼错就报错，不然会被静默忽略）。
+_ALLOWED_K8S = {"image", "image_pull_policy", "volumes", "mounts",
+                "objstore_endpoint", "service_account", "active_deadline_seconds"}
+# discover 命令在加载期执行：必须有超时，否则一个挂住的命令会卡死 load_spec。
+_DISCOVER_TIMEOUT_SECONDS = 60
+
 
 class SpecError(ValueError):
-    """管线定义或渲染错误（未知变量、缺参数等）。"""
+    """管线定义或渲染错误（未知变量、缺参数、结构非法等）。"""
 
 
 def render(template: str, context: dict, *, strict: bool = True) -> str:
@@ -175,67 +219,372 @@ def parse_duration(text: str) -> float:
     return total or float(num or 0)
 
 
+def _reject_unknown_keys(d: dict, allowed: set[str], where: str) -> None:
+    unknown = sorted(set(d) - allowed)
+    if unknown:
+        raise SpecError(
+            f"{where}: 未知字段 {unknown}（支持: {sorted(allowed)}）。"
+            f"拼写错误不会被静默忽略。"
+        )
+
+
+def validate_spec(spec: PipelineSpec, *, path: str | Path = "") -> None:
+    """加载后的结构校验：把"配置写错"变成加载期错误，而不是静默跑出假绿。
+
+    覆盖：必填/命名、stage 唯一性、依赖存在性与无环、artifact 闭合、
+    时长/重试枚举、checks 目标、未实现的 when 特性显式拒绝。
+    这是框架"跑完≠跑对"承诺的前提——框架连"配置错了"都发现不了，
+    就谈不上保证结果正确。
+    """
+    where = str(path) or spec.name
+    if not spec.name:
+        raise SpecError(f"{where}: name 不能为空")
+    if not _NAME_RE.match(spec.name):
+        raise SpecError(
+            f"{where}: name={spec.name!r} 不是合法的 K8s 资源名"
+            f"（只允许小写字母/数字/连字符）"
+        )
+    if len(spec.name) > _MAX_NAME_LEN:
+        raise SpecError(f"{where}: name 长度 {len(spec.name)} 超过 {_MAX_NAME_LEN}")
+    for key in spec.params:
+        if not isinstance(key, str) or not _PARAM_NAME_RE.match(key):
+            raise SpecError(f"{where}: 参数名 {key!r} 非法（只允许字母/数字/下划线）")
+    if spec.k8s:
+        _reject_unknown_keys(spec.k8s, _ALLOWED_K8S, f"{where}: k8s")
+    if not spec.stages:
+        raise SpecError(f"{where}: stages 不能为空（没有任何 stage 的管线会静默成功）")
+    if not spec.partitions:
+        raise SpecError(
+            f"{where}: partitions 为空——list 模式检查 items/range，"
+            f"discover 模式检查命令输出是否有分区"
+        )
+    seen_partitions: set[tuple[str, str, str]] = set()
+    for part in spec.partitions:
+        if not part.key or not _SAFE_KEY_RE.match(part.key):
+            raise SpecError(
+                f"{where}: 分区 key={part.key!r} 含不安全字符"
+                f"（只允许 Unicode 字母/数字/下划线/点/连字符；"
+                f"key 会进入文件路径与对象存储 key）"
+            )
+        if part.dataset and not _SAFE_KEY_RE.match(part.dataset):
+            raise SpecError(f"{where}: 分区 dataset={part.dataset!r} 含不安全字符")
+        if part.variant and not _SAFE_KEY_RE.match(part.variant):
+            raise SpecError(f"{where}: 分区 variant={part.variant!r} 含不安全字符")
+        item = (part.dataset, part.key, part.variant)
+        if item in seen_partitions:
+            raise SpecError(f"{where}: 分区重复 {item}（重复扇出会让对账 expected 虚高）")
+        seen_partitions.add(item)
+
+    # ---- stage 级校验 ----
+    seen: set[str] = set()
+    artifact_owner: dict[str, str] = {}
+    for idx, stage in enumerate(spec.stages):
+        loc = f"{where}: stages[{idx}]({stage.name})"
+        if not _NAME_RE.match(stage.name or ""):
+            raise SpecError(f"{loc}: stage name={stage.name!r} 不是合法 K8s 名")
+        if stage.name in seen:
+            raise SpecError(f"{loc}: stage 名重复")
+        seen.add(stage.name)
+        if not (stage.command or "").strip():
+            raise SpecError(f"{loc}: command 不能为空")
+        if stage.when.strip():
+            raise SpecError(
+                f"{loc}: when 条件分支尚未实现（本地 runner 与 Argo 编译器都不会执行它）；"
+                f"请改用 dependencies + checks，避免写了不生效"
+            )
+        for dur_name, dur_value in (("timeout", stage.timeout),
+                                    ("retry.backoff.duration", stage.retry.duration),
+                                    ("retry.backoff.max_duration", stage.retry.max_duration)):
+            if not _DURATION_RE.match(str(dur_value)) or parse_duration(dur_value) <= 0:
+                raise SpecError(
+                    f"{loc}: {dur_name}={dur_value!r} 不是有效时长"
+                    f"（示例: 45s / 30m / 2h30m）"
+                )
+        if stage.retry.limit < 0:
+            raise SpecError(f"{loc}: retry.limit 不能为负")
+        if stage.retry.policy not in _RETRY_POLICIES:
+            raise SpecError(
+                f"{loc}: retry.policy={stage.retry.policy!r} 非法"
+                f"（可选: {sorted(_RETRY_POLICIES)}）"
+            )
+        missing_artifacts = [o for o in stage.outputs if o not in stage.artifacts]
+        if missing_artifacts:
+            raise SpecError(
+                f"{loc}: outputs {missing_artifacts} 没有对应的 artifacts 路径声明"
+            )
+        for art, art_path in stage.artifacts.items():
+            if not art_path.strip():
+                raise SpecError(f"{loc}: artifact {art!r} 的路径不能为空")
+            if art in artifact_owner and artifact_owner[art] != stage.name:
+                raise SpecError(
+                    f"{loc}: artifact 名 {art!r} 与 stage {artifact_owner[art]!r} 重复"
+                    f"（artifact 名必须全局唯一，否则集群侧无法接线）"
+                )
+            artifact_owner[art] = stage.name
+        if stage.checks:
+            if not stage.outputs:
+                raise SpecError(f"{loc}: 配了 checks 但没有 outputs，质量闸门没有可检对象")
+            target = stage.outputs[0]
+            if target not in stage.artifacts:
+                raise SpecError(f"{loc}: checks 的目标 {target!r} 缺少 artifacts 路径")
+        unknown_cfg = sorted(set(stage.check_config) - set(stage.checks))
+        if unknown_cfg:
+            raise SpecError(f"{loc}: check_config 配了未在 checks 里的检查 {unknown_cfg}")
+
+    # ---- 依赖存在性 / 自依赖 / 成环 ----
+    stage_names = [s.name for s in spec.stages]
+    for stage in spec.stages:
+        for dep in stage.dependencies:
+            if dep == stage.name:
+                raise SpecError(f"{where}: stage {stage.name!r} 依赖了自己")
+            if dep not in stage_names:
+                raise SpecError(
+                    f"{where}: stage {stage.name!r} 依赖不存在的 stage {dep!r}"
+                    f"（已定义: {stage_names}）"
+                )
+    graph = {s.name: list(s.dependencies) for s in spec.stages}
+    visiting: set[str] = set()
+    done: set[str] = set()
+
+    def _visit(node: str, trail: tuple[str, ...] = ()) -> None:
+        if node in done:
+            return
+        if node in visiting:
+            raise SpecError(f"{where}: stage 依赖成环: {' -> '.join(trail + (node,))}")
+        visiting.add(node)
+        for dep in graph.get(node, []):
+            _visit(dep, trail + (node,))
+        visiting.discard(node)
+        done.add(node)
+
+    for s in spec.stages:
+        _visit(s.name)
+
+    # ---- consumes 必须指向别的 stage 产出的 artifact，且生产者必须是上游依赖 ----
+    def _ancestors(name: str) -> set[str]:
+        out: set[str] = set()
+        stack = list(graph.get(name, []))
+        while stack:
+            dep = stack.pop()
+            if dep in out:
+                continue
+            out.add(dep)
+            stack.extend(graph.get(dep, []))
+        return out
+
+    for stage in spec.stages:
+        ancestors = _ancestors(stage.name)
+        for art in stage.consumes:
+            owner = artifact_owner.get(art)
+            if owner is None:
+                raise SpecError(
+                    f"{where}: stage {stage.name!r} consumes 了不存在的 artifact {art!r}"
+                )
+            if owner == stage.name:
+                raise SpecError(
+                    f"{where}: stage {stage.name!r} consumes 了自己产出的 artifact {art!r}"
+                )
+            if owner not in ancestors:
+                raise SpecError(
+                    f"{where}: stage {stage.name!r} consumes 了 {owner!r} 的 artifact {art!r}，"
+                    f"但 {owner!r} 不是它的上游依赖（集群侧会在产物生成前就执行）"
+                )
+
+
+def _str_list(value, where: str) -> list[str]:
+    """YAML 列表字段必须是字符串列表。
+
+    写错类型（如 ``checks: file_nonempty``）被 ``list()`` 静默拆成字符列表，
+    运行期会变成 13 个"未注册检查"——必须在校验期拒绝。
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+        raise SpecError(f"{where}: 必须是字符串列表")
+    return list(value)
+
+
+def _str_map(value, where: str) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or any(
+            not isinstance(k, str) or not isinstance(v, str)
+            for k, v in value.items()):
+        raise SpecError(f"{where}: 必须是 字符串 -> 字符串 的映射")
+    return dict(value)
+
+
 def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    params = {**(raw.get("params") or {}), **(overrides or {})}
+    if raw is None:
+        raise SpecError(f"{path}: 空文件（没有任何管线定义）")
+    if not isinstance(raw, dict):
+        raise SpecError(f"{path}: 顶层必须是 YAML 映射，实际是 {type(raw).__name__}")
+    _reject_unknown_keys(raw, _ALLOWED_TOP, str(path))
+
+    raw_partitions = raw.get("partitions") or {}
+    if not isinstance(raw_partitions, dict):
+        raise SpecError(f"{path}: partitions 必须是映射（from/items/range/command）")
+    _reject_unknown_keys(raw_partitions, _ALLOWED_PARTITIONS, f"{path}: partitions")
+    raw_stages = raw.get("stages") or []
+    if not isinstance(raw_stages, list) or not raw_stages:
+        raise SpecError(f"{path}: stages 必须是非空列表")
+    for i, item in enumerate(raw_stages):
+        if not isinstance(item, dict):
+            raise SpecError(f"{path}: stages[{i}] 必须是映射")
+        _reject_unknown_keys(item, _ALLOWED_STAGE, f"{path}: stages[{i}]")
+
+    raw_params = raw.get("params")
+    if raw_params is not None and not isinstance(raw_params, dict):
+        raise SpecError(f"{path}: params 必须是映射")
+    raw_k8s = raw.get("k8s")
+    if raw_k8s is not None and not isinstance(raw_k8s, dict):
+        raise SpecError(f"{path}: k8s 必须是映射（image/volumes/mounts 等）")
+    raw_variants = raw.get("variants")
+    if raw_variants is None:
+        variants = [""]
+    else:
+        if not isinstance(raw_variants, list) or not raw_variants:
+            raise SpecError(f"{path}: variants 必须是非空列表（单变体写 [\"\"]）")
+        if any(not isinstance(v, str) for v in raw_variants):
+            raise SpecError(f"{path}: variants 元素必须是字符串")
+        variants = list(raw_variants)
+    params = {**(raw_params or {}), **(overrides or {})}
+    for key in params:
+        if not isinstance(key, str) or not _PARAM_NAME_RE.match(key):
+            raise SpecError(
+                f"{path}: 参数名 {key!r} 非法（只允许字母/数字/下划线，且不以数字开头）"
+            )
 
     # 分区来源：list（显式） / range（1..N，适合章节）/ discover（由命令产出）
-    part_cfg = raw.get("partitions", {}) or {}
+    part_cfg = raw_partitions
     partitions: list[Partition] = []
     source = part_cfg.get("from", "list")
-    variants = [str(v) for v in (raw.get("variants") or [""])]
+    dataset = part_cfg.get("dataset", "")
+    if not isinstance(dataset, str):
+        raise SpecError(f"{path}: partitions.dataset 必须是字符串")
 
     if source == "list":
-        for item in part_cfg.get("items", []):
-            if isinstance(item, dict):
-                for variant in variants:
-                    partitions.append(Partition(item.get("dataset", ""),
-                                                str(item.get("key", "")), variant))
+        items = part_cfg.get("items")
+        if items is None:
+            items = []
+        if not isinstance(items, list):
+            raise SpecError(f"{path}: partitions.items 必须是列表")
+        for idx, item in enumerate(items):
+            if isinstance(item, str):
+                key, item_ds = item, item
+            elif isinstance(item, dict):
+                _reject_unknown_keys(item, {"dataset", "key"},
+                                     f"{path}: partitions.items[{idx}]")
+                key = item.get("key", "")
+                item_ds = item.get("dataset", "")
+                if not isinstance(key, str) or not isinstance(item_ds, str):
+                    raise SpecError(
+                        f"{path}: partitions.items[{idx}] 的 key/dataset 必须是字符串")
             else:
-                for variant in variants:
-                    partitions.append(Partition(str(item), str(item), variant))
-    elif source == "range":
-        for key in range(int(part_cfg.get("start", 1)), int(part_cfg.get("end", 1)) + 1):
+                raise SpecError(
+                    f"{path}: partitions.items[{idx}] 必须是字符串或 {{dataset, key}} 映射")
+            if not key:
+                raise SpecError(f"{path}: partitions.items[{idx}] 的 key 不能为空")
             for variant in variants:
-                partitions.append(Partition(str(part_cfg.get("dataset", "")), str(key), variant))
+                partitions.append(Partition(item_ds, key, variant))
+    elif source == "range":
+        try:
+            start = int(part_cfg.get("start", 1))
+            end = int(part_cfg.get("end", 1))
+        except (TypeError, ValueError) as exc:
+            raise SpecError(f"{path}: range 分区 start/end 必须是整数: {exc}") from exc
+        for key in range(start, end + 1):
+            for variant in variants:
+                partitions.append(Partition(dataset, str(key), variant))
     elif source == "discover":
         # 由 discover 命令产出分区清单（对应 Argo 的动态工作流生成）
         import subprocess
         cmd = part_cfg.get("command", "")
-        if cmd:
-            out = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True).stdout
-            for line in out.split():
-                for variant in variants:
-                    partitions.append(Partition(str(part_cfg.get("dataset", "")), line, variant))
+        if not cmd:
+            raise SpecError(f"{path}: partitions.from=discover 但缺少 command")
+        if not isinstance(cmd, str):
+            raise SpecError(f"{path}: partitions.command 必须是字符串（shell 命令）")
+        try:
+            proc = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                                  timeout=_DISCOVER_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            raise SpecError(
+                f"{path}: discover 命令超过 {_DISCOVER_TIMEOUT_SECONDS}s 未返回") from exc
+        except Exception as exc:                       # pragma: no cover - 环境异常
+            raise SpecError(f"{path}: discover 命令无法执行: {exc!r}") from exc
+        if proc.returncode != 0:
+            raise SpecError(
+                f"{path}: discover 命令失败（exit={proc.returncode}）: "
+                f"{(proc.stderr or proc.stdout).strip()[:300]}"
+            )
+        # 按行解析（与集群 discover 脚本一致）：含空格的 key 会作为一整行被
+        # charset 校验拒绝，而不是在加载期被 split() 拆成两个"合法"分区。
+        lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+        if not lines:
+            raise SpecError(f"{path}: discover 命令没有输出任何分区")
+        for line in lines:
+            for variant in variants:
+                partitions.append(Partition(dataset, line, variant))
     else:
-        raise ValueError(f"未知 partitions.from: {source}")
+        raise SpecError(f"{path}: 未知 partitions.from={source!r}（可选: list / range / discover）")
 
-    stages = [
-        Stage(
+    stages: list[Stage] = []
+    for i, s in enumerate(raw_stages):
+        loc = f"{path}: stages[{i}]"
+        for required in ("name", "command"):
+            if not s.get(required):
+                raise SpecError(f"{loc} 缺少必填字段 {required!r}")
+            if not isinstance(s[required], str):
+                raise SpecError(f"{loc}.{required} 必须是字符串")
+        retry_raw = s.get("retry")
+        if retry_raw is not None and not isinstance(retry_raw, dict):
+            raise SpecError(f"{loc}.retry 必须是映射")
+        try:
+            retry = RetryPolicy.from_dict(retry_raw)
+        except (TypeError, ValueError) as exc:
+            raise SpecError(f"{loc}.retry 非法: {exc}") from exc
+        timeout_raw = s.get("timeout", "30m")
+        if not isinstance(timeout_raw, str):
+            raise SpecError(f"{loc}.timeout 必须是字符串（如 30m）")
+        when_raw = s.get("when", "")
+        if not isinstance(when_raw, str):
+            raise SpecError(f"{loc}.when 必须是字符串")
+        check_config = s.get("check_config") or {}
+        if not isinstance(check_config, dict):
+            raise SpecError(f"{loc}.check_config 必须是映射")
+        resources = s.get("resources") or {}
+        if not isinstance(resources, dict):
+            raise SpecError(f"{loc}.resources 必须是映射")
+        stages.append(Stage(
             name=s["name"],
             command=s["command"],
-            inputs=list(s.get("inputs", [])),
-            outputs=list(s.get("outputs", [])),
-            dependencies=list(s.get("dependencies", [])),
-            retry=RetryPolicy.from_dict(s.get("retry")),
-            timeout=str(s.get("timeout", "30m")),
-            checks=list(s.get("checks", [])),
-            when=str(s.get("when", "")),
-            artifacts=dict(s.get("artifacts", {}) or {}),
-            consumes=list(s.get("consumes", []) or []),
-            check_config=dict(s.get("check_config", {}) or {}),
-            resources=dict(s.get("resources", {}) or {}),
-        )
-        for s in raw.get("stages", [])
-    ]
+            inputs=_str_list(s.get("inputs"), f"{loc}.inputs"),
+            outputs=_str_list(s.get("outputs"), f"{loc}.outputs"),
+            dependencies=_str_list(s.get("dependencies"), f"{loc}.dependencies"),
+            retry=retry,
+            timeout=timeout_raw,
+            checks=_str_list(s.get("checks"), f"{loc}.checks"),
+            when=when_raw,
+            artifacts=_str_map(s.get("artifacts"), f"{loc}.artifacts"),
+            consumes=_str_list(s.get("consumes"), f"{loc}.consumes"),
+            check_config=dict(check_config),
+            resources=dict(resources),
+        ))
 
+    name = raw.get("name", Path(path).stem)
+    if not isinstance(name, str):
+        raise SpecError(f"{path}: name 必须是字符串")
+    description = raw.get("description", "")
+    if not isinstance(description, str):
+        raise SpecError(f"{path}: description 必须是字符串")
     spec = PipelineSpec(
-        name=raw.get("name", Path(path).stem),
+        name=name,
         stages=stages,
         partitions=partitions,
-        description=raw.get("description", ""),
+        description=description,
         params=params,
-        k8s=dict(raw.get("k8s", {}) or {}),
+        k8s=dict(raw_k8s or {}),
         partitions_source=source,
         discover_command=str(part_cfg.get("command", "")),
     )
@@ -258,4 +607,5 @@ def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
             f"已声明: {sorted(declared)}。请在 params 里补上或由运行方注入。"
         )
 
+    validate_spec(spec, path=path)
     return spec

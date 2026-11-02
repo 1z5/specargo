@@ -67,15 +67,19 @@ stages:
   # ---------------- 3. 确定性分片 + manifest ----------------
   - name: shard
     dependencies: [clean]
-    command: "{{params.python}} {{params.app_dir}}/dataset_steps.py shard --in {{params.work_dir}}/clean/{{partition.key}}.jsonl --out-dir {{params.work_dir}}/shards/{{partition.key}} --shards {{params.shards}} --manifest {{params.work_dir}}/manifest/{{partition.key}}.json --dataset raw_partition --version {{params.run_id}} --base-dir {{params.work_dir}}"
+    # 深度自校验放在本 stage 命令内：manifest.py verify 需要 shards 文件，
+    # 而 shards 目录不是单文件 artifact、无法被跨 Pod gate get（见 ROADMAP 已知边界）。
+    # 这样本地 runner 与集群执行在同一进程内完成"分片齐全 + 校验和 + 条数"校验。
+    command: "{{params.python}} {{params.app_dir}}/dataset_steps.py shard --in {{params.work_dir}}/clean/{{partition.key}}.jsonl --out-dir {{params.work_dir}}/shards/{{partition.key}} --shards {{params.shards}} --manifest {{params.work_dir}}/manifest/{{partition.key}}.json --dataset raw_partition --version {{params.run_id}} --base-dir {{params.work_dir}} && {{params.python}} {{params.app_dir}}/manifest.py verify --manifest {{params.work_dir}}/manifest/{{partition.key}}.json --base-dir {{params.work_dir}}"
     outputs: [manifest]
     consumes: [clean]
     artifacts:
       manifest: "{{params.work_dir}}/manifest/{{partition.key}}.json"
-    checks: [file_nonempty, command]
+    checks: [file_nonempty, json_schema]
     check_config:
       file_nonempty: {min_bytes: 2}
-      # 独立复核：manifest 与分片必须自洽（条数合计、校验和、分片齐全）
-      command:
-        run: "{{params.python}} {{params.app_dir}}/manifest.py verify --manifest {{artifact}} --base-dir {{params.work_dir}}"
+      # gate 只依赖 manifest 自身（可跨 Pod 取回）：校验 manifest 的结构完整性。
+      # 深度一致性（shards 校验和/条数）已在上面的 stage 命令内完成。
+      json_schema:
+        required: [dataset, version, shard_count, rows, shards]
     timeout: 120s

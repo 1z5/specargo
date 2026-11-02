@@ -86,7 +86,13 @@ class Service:
         self.workers = workers
         self.graceful_timeout = graceful_timeout
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="task")
-        self.state = connect(state_db) if (state_db and connect) else None
+        # sqlite3 连接默认禁止跨线程使用；这里的连接由一把锁串行保护，
+        # 所以显式关闭该限制。旧实现既没锁也没关限制，worker 线程写库抛
+        # ProgrammingError 后被 `except: pass` 吞掉——/readyz 恒 503、状态表永远空。
+        self.state = (connect(state_db, check_same_thread=False)
+                      if (state_db and connect) else None)
+        self._state_lock = threading.Lock()
+        self.state_error: str | None = None
 
         self.jobs: dict[str, dict] = {}          # job_id -> 任务记录（生产应落库）
         self._jobs_lock = threading.Lock()
@@ -110,7 +116,8 @@ class Service:
         checks = {"processor": self.processor.name}
         if self.state is not None:
             try:
-                self.state.execute("SELECT 1").fetchone()
+                with self._state_lock:
+                    self.state.execute("SELECT 1").fetchone()
                 checks["state_db"] = "ok"
             except Exception as exc:
                 checks["state_db"] = f"error: {exc}"
@@ -174,11 +181,13 @@ class Service:
             # 状态登记到 item 表（任务记录）
             if self.state is not None and connect:
                 try:
-                    upsert_generic_item(
-                        self.state, dataset="service", partition=job_id, variant="",
-                        status=job["status"], run_id=job_id, stage=self.processor.name)
-                except Exception:
-                    pass
+                    with self._state_lock:
+                        upsert_generic_item(
+                            self.state, dataset="service", partition=job_id, variant="",
+                            status=job["status"], run_id=job_id, stage=self.processor.name)
+                except Exception as exc:        # 不能再静默：写库失败会让 readyz 失真
+                    self.state_error = repr(exc)
+                    print(f"[state] 状态写入失败 job={job_id}: {exc!r}", flush=True)
 
     def get_job(self, job_id: str) -> dict | None:
         with self._jobs_lock:
@@ -248,6 +257,13 @@ class Service:
         print(f"[shutdown] checkpoint: inflight={self.inflight} "
               f"jobs={len(self.jobs)}", flush=True)
         self.pool.shutdown(wait=False, cancel_futures=True)
+        # 显式关闭状态库连接（单连接 + 锁；进程退出虽会兜底，但不留悬空句柄）
+        if self.state is not None:
+            with self._state_lock:
+                try:
+                    self.state.close()
+                except Exception as exc:            # pragma: no cover - 关库异常只记录
+                    print(f"[shutdown] 关闭状态库失败: {exc!r}", flush=True)
         print("[shutdown] 已退出", flush=True)
 
 

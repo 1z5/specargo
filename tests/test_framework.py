@@ -235,7 +235,7 @@ def test_runner_resume_skips_verified():
         # 第二次：应全部 resume 跳过，且不产生新执行
         r2 = Runner(spec, state_db=str(db), workdir=work, verbose=False).run()
         assert all(x.status == "skipped" for x in r2.runs), [x.status for x in r2.runs]
-        assert all("already verified" in x.detail for x in r2.runs)
+        assert all("already completed" in x.detail for x in r2.runs)
         # 跳过不算失败
         assert r2.ok
         # --force 应重新执行

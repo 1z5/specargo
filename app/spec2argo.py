@@ -35,21 +35,41 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import shlex
 import sys
 from pathlib import Path
 
 import yaml
 
-from spec import PipelineSpec, Stage, load_spec
+from spec import PipelineSpec, SpecError, Stage, load_spec
 
 # ---------------------------------------------------------------------------
 # 表达式翻译：spec 模板 → Argo 模板
 # ---------------------------------------------------------------------------
 
-_PARAM_MAP = {
-    "params.python": "python3",
-    "params.app_dir": "/app",
+# 集群执行时的"有效参数值"：执行环境约定不交给 spec.params 的字面值。
+#   python   -> 容器里的解释器
+#   app_dir  -> 容器内代码目录
+#   work_dir -> 集群统一挂载点（由 k8s.mounts 决定）
+# run_id 由编排器注入（{{workflow.name}}）。
+_EFFECTIVE_PARAMS = {
+    "python": "python3",
+    "app_dir": "/app",
+    "work_dir": "/output",
 }
+_PARAMS_RE = re.compile(r"\{\{\s*params\.([a-zA-Z_]\w*)\s*\}\}")
+_PARTITION_RE = re.compile(r"\{\{\s*partition\.(dataset|key|variant)\s*\}\}")
+# spec 的 partition.key 对应 Argo 模板输入参数名 partition（dataset/variant 同名）
+_PARTITION_PARAM = {"key": "partition", "dataset": "dataset", "variant": "variant"}
+
+
+def _param_str(spec: PipelineSpec, name: str) -> str:
+    """spec 参数 -> 集群侧字符串值（None 归一为空串，与 workflow arguments 一致）。"""
+    if name in _EFFECTIVE_PARAMS:
+        return _EFFECTIVE_PARAMS[name]
+    value = spec.params.get(name, "")
+    return "" if value is None else str(value)
 
 
 def translate(expr: str, *, in_fanout: bool = True) -> str:
@@ -57,27 +77,55 @@ def translate(expr: str, *, in_fanout: bool = True) -> str:
 
     ``{{partition.key}}``      -> ``{{inputs.parameters.partition}}``
     ``{{partition.variant}}``  -> ``{{inputs.parameters.variant}}``
+    ``{{partition.dataset}}``  -> ``{{inputs.parameters.dataset}}``
     ``{{params.run_id}}``      -> ``{{workflow.name}}``
-    ``{{params.work_dir}}``    -> ``/output``（集群统一挂载点，由 k8s.mounts 决定）
-    其余 ``{{params.x}}``      -> 字面量（见 _PARAM_MAP）
+    ``{{params.app_dir}}``     -> ``/app``（``python`` -> ``python3``，``work_dir`` -> ``/output``）
+    其余 ``{{params.x}}``      -> ``{{workflow.parameters.x}}``（编译进 workflow arguments）
     """
-    import re
+    def _params(m: re.Match) -> str:
+        name = m.group(1)
+        if name == "run_id":
+            return "{{workflow.name}}"
+        if name in _EFFECTIVE_PARAMS:
+            return _EFFECTIVE_PARAMS[name]
+        return "{{workflow.parameters.%s}}" % name
 
-    out = expr
-    for spec_var, argo_var in _PARAM_MAP.items():
-        out = out.replace("{{%s}}" % spec_var, argo_var)
-
-    out = out.replace("{{params.run_id}}", "{{workflow.name}}")
-    out = out.replace("{{params.work_dir}}", "/output")
-    out = out.replace("{{partition.key}}", "{{inputs.parameters.partition}}")
-    out = out.replace("{{partition.variant}}", "{{inputs.parameters.variant}}")
-    out = out.replace("{{partition.dataset}}", "{{inputs.parameters.dataset}}")
+    out = _PARAMS_RE.sub(_params, expr)
+    out = _PARTITION_RE.sub(
+        lambda m: "{{inputs.parameters.%s}}" % _PARTITION_PARAM[m.group(1)], out)
     return out
+
+
+def _workflow_arguments(spec: PipelineSpec) -> list[dict]:
+    """所有 spec.params 编译成 workflow arguments（可在 submit 时用 -p 覆盖）。"""
+    args: list[dict] = []
+    for name in spec.params:
+        name = str(name)
+        if name == "run_id":            # 由编排器注入 workflow.name，不做参数
+            continue
+        args.append({"name": name, "value": _param_str(spec, name)})
+    return args
+
+
+def _partition_items(spec: PipelineSpec) -> list[dict]:
+    return [
+        {"key": p.key, "dataset": p.dataset, "variant": p.variant}
+        for p in spec.partitions
+    ]
 
 
 # ---------------------------------------------------------------------------
 # 代码片段构造
 # ---------------------------------------------------------------------------
+
+def _artifact_key(artifact_name: str) -> str:
+    """对象存储路径契约：``runs/$RUN_ID/<partition>/<artifact>.<ext>``。
+
+    上下游只约定 key 怎么算，不依赖编排器的 artifact 配对行为；
+    run_id 用容器环境变量展开（由编译产物注入，不硬编码值）。
+    """
+    return 'runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/%s' % _ext(artifact_name)
+
 
 def _objstore_put_snippet(artifacts: dict[str, str]) -> str:
     """上游 stage：把声明产物按路径契约 put 到对象存储。"""
@@ -85,10 +133,9 @@ def _objstore_put_snippet(artifacts: dict[str, str]) -> str:
         return ""
     lines = ["# 路径契约：上游只负责把产物写到约定 key，不依赖编排器的 artifact 配对"]
     for name, path in artifacts.items():
-        key = 'runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/%s' % _ext(name)
         lines.append(
             'python3 /app/objstore.py put --key "%s" --file %s'
-            % (key, translate(path))
+            % (_artifact_key(name), shlex.quote(translate(path)))
         )
     return "\n".join(lines)
 
@@ -99,29 +146,44 @@ def _objstore_get_snippet(artifacts: dict[str, str]) -> str:
         return ""
     lines = ["# 路径契约：从上游产物取数（经对象存储，与节点无关）"]
     for name, path in artifacts.items():
-        key = 'runs/$TTS_RUN_ID/{{inputs.parameters.partition}}/%s' % _ext(name)
         lines.append(
             'python3 /app/objstore.py get --key "%s" --file %s'
-            % (key, translate(path))
+            % (_artifact_key(name), shlex.quote(translate(path)))
         )
     return "\n".join(lines)
 
 
-def _discover_script(cmd: str) -> str:
-    """把用户的发现命令包一层：结果同时打印并写成 JSON 数组文件。
+def _discover_script(cmd: str, dataset: str, variants: list[str]) -> str:
+    """把用户的发现命令包一层，产出 Argo withParam 需要的 JSON 数组。
 
-    Argo 的 withParam 需要 JSON 数组字符串，而用户的命令输出的是每行一个分区，
-    所以在脚本里做一次转换。
+    输出元素是 ``{key, dataset, variant}`` 对象，而不是裸字符串——
+    否则集群侧 ``{{partition.dataset}}`` / ``{{partition.variant}}`` 都渲染成空串，
+    "同一 spec 本地跑 4 个 (dataset×variant) 分区、集群只跑 4 个没有维度的 key"
+    这种漂移就发生了（本地 runner 与集群语义必须一致）。
+
+    dataset / variants 由编译期注入环境变量，避免把引号拼进 shell。
     """
-    # 用户的命令可能带 if/fi 等多行结构，不能直接接管道；
-    # 先把输出落临时文件，再统一转 JSON 数组并 tee 到 Argo 输出参数路径
+    # discover 的输出是 withParam 的元素来源，必须同时满足 Argo 的 JSON 契约与
+    # 本框架的安全字符集（key 会进入路径/对象 key）：非法值直接失败，不要带病扇出。
     return (
         "set -e\n"
         "mkdir -p /tmp/out\n"
         + cmd.strip() + " > /tmp/out/found.txt\n"
-        "python3 -c 'import sys, json\n"
-        "lines = [l.strip() for l in open(\"/tmp/out/found.txt\") if l.strip()]\n"
-        "print(json.dumps(lines))' | tee /tmp/out/items.json\n"
+        "python3 - <<'PY' > /tmp/out/items.json\n"
+        "import json, os, re, sys\n"
+        "lines = [l.strip() for l in open('/tmp/out/found.txt', encoding='utf-8') "
+        "if l.strip()]\n"
+        "dataset = os.environ.get('SPEC_DATASET', '')\n"
+        "variants = json.loads(os.environ.get('SPEC_VARIANTS', '[\"\"]')) or ['']\n"
+        "bad = [k for k in lines if not re.fullmatch(r'[\\w.-]+', k)]\n"
+        "if bad:\n"
+        "    print(f'discover 输出含非法分区 key（只允许字母/数字/_.-）: {bad[:5]}', "
+        "file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+        "items = [{'key': k, 'dataset': dataset, 'variant': v}\n"
+        "         for k in lines for v in variants]\n"
+        "print(json.dumps(items, ensure_ascii=False))\n"
+        "PY\n"
     )
 
 
@@ -130,29 +192,87 @@ def _ext(artifact_name: str) -> str:
     return artifact_name if "." in artifact_name else artifact_name + ".jsonl"
 
 
-def _gate_snippet(stage: Stage) -> str:
-    """质量闸门：独立跑 checks.py 插件，不过检则非零退出。"""
+def _resolve_for_gate(value, *, spec: PipelineSpec, artifact_path: str):
+    """把 gate 配置里的 spec 模板解析成集群侧可直接使用的值。
+
+    gate 是独立 Pod，没有 runner 的 context。策略：
+    - ``{{params.x}}``  用编译期有效值替换成字面量（配置是静态的，无需运行时覆盖）
+    - ``{{artifact}}``  替换成本 Pod 里要检查的本地路径
+    - ``{{partition.*}}`` 保留并翻译成 Argo 模板（由 withParam 展开）
+    """
+    if isinstance(value, dict):
+        return {k: _resolve_for_gate(v, spec=spec, artifact_path=artifact_path)
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_for_gate(v, spec=spec, artifact_path=artifact_path)
+                for v in value]
+    if isinstance(value, str):
+        def _param(m: re.Match) -> str:
+            name = m.group(1)
+            if name == "run_id":
+                return "{{workflow.name}}"
+            return _param_str(spec, name)
+
+        text = _PARAMS_RE.sub(_param, value)
+        text = text.replace("{{artifact}}", artifact_path)
+        return translate(text)
+    return value
+
+
+def _gate_snippet(stage: Stage, spec: PipelineSpec) -> str:
+    """质量闸门：独立 Pod 先按路径契约把产物取回来，再跑 checks.py 插件。
+
+    为什么必须先 get：gate 与 producer 是两个 Pod，不能假设同节点共享 hostPath。
+    早期版本 gate 直接读节点本地文件，CI 里 15/15 个 gate 恰好与 producer 同节点
+    才通过——换调度就是误红/读陈旧数据误绿，等于集群侧没有质量保证。
+    """
     if not stage.checks:
         return ""
-    cfg = json.dumps(stage.check_config, ensure_ascii=False)
-    checks = ", ".join('"%s"' % c for c in stage.checks)
+    if not stage.outputs or stage.outputs[0] not in stage.artifacts:
+        raise SpecError(
+            f"stage {stage.name!r}: 配了 checks 时 outputs[0] 必须有对应的 artifacts 路径"
+        )
+    artifact_name = stage.outputs[0]
+    local_path = translate(stage.artifacts[artifact_name])
+    cfg = _resolve_for_gate(stage.check_config, spec=spec, artifact_path=local_path)
     return (
-        "python3 -c '\n"
-        "import sys\n"
-        'sys.path.insert(0, "/app")\n'
+        "set -e\n"
+        "python3 /app/objstore.py get --key \"%s\" --file %s\n"
+        % (_artifact_key(artifact_name), shlex.quote(local_path))
+        + "cat > /tmp/gate_config.json <<'JSON'\n"
+        + json.dumps(cfg, ensure_ascii=False, indent=0)
+        + "\nJSON\n"
+        "python3 - <<'PY'\n"
+        "import json, sys\n"
+        "sys.path.insert(0, '/app')\n"
         "from pathlib import Path\n"
         "from checks import run_check\n"
-        "\n"
+        "cfg = json.load(open('/tmp/gate_config.json', encoding='utf-8'))\n"
         "failed = []\n"
-        "cfg = %s\n"
-        "for name in [%s]:\n"
-        "    r = run_check(name, Path(\"%s\"), cfg.get(name, {}), {})\n"
-        "    print(f\"[gate] {name}: passed={r.passed} metric={r.metric} {r.detail}\")\n"
+        "for name in " + repr(list(stage.checks)) + ":\n"
+        "    r = run_check(name, Path(" + repr(local_path) + "), cfg.get(name, {}), {})\n"
+        "    print(f'[gate] {name}: passed={r.passed} metric={r.metric} {r.detail}')\n"
         "    if not r.passed:\n"
         "        failed.append(name)\n"
         "sys.exit(1 if failed else 0)\n"
-        "'" % (cfg, checks, translate(stage.artifacts[stage.outputs[0]]))
+        "PY\n"
     )
+
+
+def _assert_no_spec_templates(wf: dict, source: str = "") -> None:
+    """编译后自检：产物里不能再有 spec 专有的模板变量。
+
+    CI 的 argo lint 只做 schema 校验、不解析模板变量，所以"编译产物里残留
+    ``{{params.x}}``"这类问题一直能骗过 CI，直到真正 submit。这条断言把
+    "一份 spec 两个目标"变成可验证条件。
+    """
+    text = yaml.safe_dump(wf, allow_unicode=True, sort_keys=False)
+    # 宽松匹配变量名（含 - 等字符），防止 {{params.foo-bar}} 这类漏网；
+    # 同时覆盖带空格的 {{ params.x }} / {{ artifact }} 写法。
+    leftover = sorted(set(re.findall(
+        r"\{\{\s*(?:params\.[^{}\s]*|partition\.[^{}\s]*|artifact)\s*\}\}", text)))
+    if leftover:
+        raise SpecError(f"{source}: 编译产物里还有未解析的 spec 模板变量: {leftover}")
 
 
 # ---------------------------------------------------------------------------
@@ -162,10 +282,16 @@ def _gate_snippet(stage: Stage) -> str:
 def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
                      namespace: str = "argo") -> dict:
     k8s = getattr(spec, "k8s", None) or {}
-    image = k8s.get("image", "tts-argo:ci")
-    pull_policy = k8s.get("image_pull_policy", "Never")
+    # 默认镜像只是明确占位：编译器不替使用者决定业务镜像，
+    # 真实镜像由 pipelines/*.yaml 的 k8s.image 提供（本轮不改示例里的镜像名）。
+    image = k8s.get("image", "pipeline-image:latest")
+    pull_policy = k8s.get("image_pull_policy", "IfNotPresent")
     volumes = k8s.get("volumes", {}) or {}
     mounts = k8s.get("mounts", {}) or {}
+    objstore_endpoint = k8s.get(
+        "objstore_endpoint", "http://object-store.argo.svc.cluster.local:5000")
+    service_account = k8s.get("service_account", "default")
+    active_deadline = int(k8s.get("active_deadline_seconds", 1800))
 
     # artifact 名 -> 产出它的 stage（用于给下游接线 get）
     produced_by: dict[str, str] = {}
@@ -177,20 +303,38 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
 
     volume_mounts = [{"name": n, "mountPath": p} for n, p in mounts.items()]
 
+    # 扇出元素统一为 (key, dataset, variant) 对象：
+    # 只传 key 会让集群侧 {{partition.dataset}}/{{partition.variant}} 渲染成空串，
+    # 与本地 runner 的 (dataset × variant) 分区语义漂移。
+    partition_items = _partition_items(spec)
+    variants: list[str] = []
+    datasets: list[str] = []
+    for p in spec.partitions:
+        if p.variant not in variants:
+            variants.append(p.variant)
+        if p.dataset not in datasets:
+            datasets.append(p.dataset)
+    discover_dataset = datasets[0] if datasets else ""
+
     templates: list[dict] = []
 
     # ---- discover 任务（动态分区）----
     use_discover = getattr(spec, "partitions_source", "list") == "discover"
     discover_cmd = getattr(spec, "discover_command", "")
     if use_discover:
-        # discover 的输出必须是 JSON 数组字符串，Argo 才能当 withParam 的列表
         templates.append({
             "name": "discover-scan",
             "script": {
                 "image": image,
                 "imagePullPolicy": pull_policy,
                 "command": ["sh", "-c"],
-                "args": [_discover_script(discover_cmd)],
+                "args": [_discover_script(discover_cmd, discover_dataset,
+                                          variants or [""])],
+                "env": [
+                    {"name": "SPEC_DATASET", "value": discover_dataset},
+                    {"name": "SPEC_VARIANTS",
+                     "value": json.dumps(variants or [""], ensure_ascii=False)},
+                ],
                 "volumeMounts": volume_mounts,
             },
             "outputs": {
@@ -211,7 +355,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
             if art_name in produced_by and produced_by[art_name] != stage.name:
                 consumed.append((art_name, artifact_paths[art_name]))
 
-        parts = []
+        parts = ["set -e"]          # get/put 失败必须中断，不能继续"成功"
         get_snip = _objstore_get_snippet(dict(consumed))
         if get_snip:
             parts.append(get_snip)
@@ -228,8 +372,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
             "args": [script],
             "env": [
                 {"name": "TTS_RUN_ID", "value": "{{workflow.name}}"},
-                {"name": "OBJSTORE_ENDPOINT",
-                 "value": "http://object-store.argo.svc.cluster.local:5000"},
+                {"name": "OBJSTORE_ENDPOINT", "value": objstore_endpoint},
             ],
         }
         if volume_mounts:
@@ -240,7 +383,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
         tmpl: dict = {
             "name": stage.name,
             "inputs": {"parameters": [
-                {"name": "partition"}, {"name": "variant"}, {"name": "dataset"},
+                {"name": "partition"}, {"name": "dataset"}, {"name": "variant"},
             ]},
             "timeout": stage.timeout,
             "container": container,
@@ -266,14 +409,21 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
                 "image": image,
                 "imagePullPolicy": pull_policy,
                 "command": ["sh", "-c"],
-                "args": [_gate_snippet(stage)],
-                "env": [{"name": "TTS_RUN_ID", "value": "{{workflow.name}}"}],
+                "args": [_gate_snippet(stage, spec)],
+                "env": [
+                    {"name": "TTS_RUN_ID", "value": "{{workflow.name}}"},
+                    {"name": "OBJSTORE_ENDPOINT", "value": objstore_endpoint},
+                ],
             }
             if volume_mounts:
                 gate_container["volumeMounts"] = volume_mounts
             templates.append({
                 "name": "gate-" + stage.name,
-                "inputs": {"parameters": [{"name": "partition"}]},
+                # gate 可能引用 {{partition.dataset}}/{{partition.variant}}（例如按变体
+                # 选阈值），所以三个维度都要声明，否则 Argo 运行期解析未声明输入直接失败。
+                "inputs": {"parameters": [
+                    {"name": "partition"}, {"name": "dataset"}, {"name": "variant"},
+                ]},
                 "timeout": "5m",
                 "retryStrategy": {"limit": "0"},   # 检查失败是数据问题，重试无意义
                 "container": gate_container,
@@ -292,7 +442,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
             if "discover" not in deps:
                 deps = ["discover"] + deps
         else:
-            with_param = json.dumps([p.key for p in spec.partitions])
+            with_param = json.dumps(partition_items, ensure_ascii=False)
 
         tasks.append({
             "name": stage.name,
@@ -300,9 +450,9 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
             "dependencies": deps,
             "withParam": with_param,
             "arguments": {"parameters": [
-                {"name": "partition", "value": "{{item}}"},
-                {"name": "variant", "value": ""},
-                {"name": "dataset", "value": ""},
+                {"name": "partition", "value": "{{item.key}}"},
+                {"name": "dataset", "value": "{{item.dataset}}"},
+                {"name": "variant", "value": "{{item.variant}}"},
             ]},
         })
 
@@ -314,26 +464,34 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
                 "dependencies": gate_deps,
                 "withParam": with_param,
                 "arguments": {"parameters": [
-                    {"name": "partition", "value": "{{item}}"},
+                    {"name": "partition", "value": "{{item.key}}"},
+                    {"name": "dataset", "value": "{{item.dataset}}"},
+                    {"name": "variant", "value": "{{item.variant}}"},
                 ]},
             })
 
     templates.insert(0, {"name": "main", "dag": {"tasks": tasks}})
 
+    wf_spec: dict = {
+        "entrypoint": "main",
+        "activeDeadlineSeconds": active_deadline,
+        "podGC": {"strategy": "OnWorkflowSuccess"},
+        "ttlStrategy": {"secondsAfterCompletion": 3600},
+        "serviceAccountName": service_account,
+        "volumes": [{"name": n, **v} for n, v in volumes.items()],
+        "templates": templates,
+    }
+    arguments = _workflow_arguments(spec)
+    if arguments:
+        wf_spec["arguments"] = {"parameters": arguments}
+
     wf = {
         "apiVersion": "argoproj.io/v1alpha1",
         "kind": "Workflow",
         "metadata": {"name": name or spec.name, "namespace": namespace},
-        "spec": {
-            "entrypoint": "main",
-            "activeDeadlineSeconds": 1800,
-            "podGC": {"strategy": "OnWorkflowSuccess"},
-            "ttlStrategy": {"secondsAfterCompletion": 3600},
-            "serviceAccountName": "default",
-            "volumes": [{"name": n, **v} for n, v in volumes.items()],
-            "templates": templates,
-        },
+        "spec": wf_spec,
     }
+    _assert_no_spec_templates(wf, source=spec.name)
     return wf
 
 

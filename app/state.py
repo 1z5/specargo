@@ -59,11 +59,16 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def connect(db_path: str | Path) -> sqlite3.Connection:
-    """打开（必要时创建）状态库。WAL 便于多进程读写。"""
+def connect(db_path: str | Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
+    """打开（必要时创建）状态库。WAL 便于多进程读写。
+
+    ``check_same_thread=False`` 只给"一个连接被多个线程串行使用"的场景用
+    （如常驻服务用一把锁保护同一连接的读写）；默认保持 sqlite3 的线程约束，
+    避免把跨线程误用静默放过。
+    """
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=30)
+    conn = sqlite3.connect(str(path), timeout=30, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
@@ -277,18 +282,23 @@ def items_for_generic(conn, dataset: str, variant: str = "") -> list[sqlite3.Row
     ).fetchall()
 
 
-def reconcile_generic(conn, dataset: str, expected, final_stage: str | None = None) -> dict:
+def reconcile_generic(conn, dataset: str, expected, final_stage: str | None = None,
+                      terminal_statuses: Sequence[str] = (VERIFIED,)) -> dict:
     """对账：expected 由**调用方（管线定义）**给出，不再从领域数据推导。
 
     ``expected`` 是 (dataset, partition, variant) 三元组列表——
     TTS 管线来自书籍 JSON 推导，ETL 管线来自时间窗，两者走同一套对账。
     ``final_stage``：只按最后一个 stage 判定是否交付（多 stage 管线的正确语义：
     中间 stage 成功不代表整条管线成功）。
+    ``terminal_statuses``：末 stage 的"可交付终态"。有质量闸门的 stage 只认
+    ``verified``；没有配置 checks 的 stage 由 Runner 传入 ``generated`` 也算交付
+    ——否则"不配质量闸门"的管线永远无法通过，等于框架隐性强制每个 stage 都要 checks。
 
     ⚠️ variant 必须参与对账：TTS 这类"同内容多音色"的管线，
     若按 (dataset, stage) 聚合，A 音色缺的章节会被 B 音色的记录掩盖 → 假绿。
     这里按 (dataset, variant) 分组分别对账，再合并结论。
     """
+    terminal = tuple(terminal_statuses) or (VERIFIED,)
     groups: dict[str, dict] = {}
     for ds, key, variant in expected:
         if ds != dataset:
@@ -314,7 +324,7 @@ def reconcile_generic(conn, dataset: str, expected, final_stage: str | None = No
         for key in g["expected"]:
             if key not in rows:
                 missing.append(f"{variant or '-'}:{key}" if variant else key)
-            elif rows[key]["status"] != VERIFIED:
+            elif rows[key]["status"] not in terminal:
                 not_verified.append(f"{variant or '-'}:{key}" if variant else key)
 
     return {
