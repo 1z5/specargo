@@ -132,6 +132,7 @@ jobs:
           gunzip -f /tmp/argo.gz            # 得到 /tmp/argo
           chmod +x /tmp/argo
           /tmp/argo version
+          mkdir -p /tmp/compiled
 
           # 编译产物（与 unit-tests 用的是同一个编译器）。
           # 仅 CI 覆盖 pod_gc_strategy=""：保留 Pod 以便后面做跨节点/数量断言，
@@ -167,6 +168,7 @@ jobs:
       - name: 编译并提交 journal=on 变体（验证 onExit 对账）
         run: |
           set -e
+          mkdir -p /tmp/compiled
           python3 - <<'PY'
           import sys
           import yaml
