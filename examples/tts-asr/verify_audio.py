@@ -43,10 +43,10 @@ from tts_verify.reporter import (
 from tts_verify.sentence_matcher import find_sentence_results, missing_only, unsure_only
 
 # item 级状态登记 + Argo 输出参数（框架层）
-from argo_io import write_params
+from specargo.argo_io import write_params
 from domain_state import upsert_tts_item
-from envcompat import LEGACY_RUN_ID, LEGACY_STATE_DB, getenv
-from state import FAILED, VERIFIED, close_run, connect, open_run
+from specargo.envcompat import LEGACY_RUN_ID, LEGACY_STATE_DB, getenv
+from specargo.state import FAILED, VERIFIED, close_run, connect, open_run
 
 
 def parse_item_from_path(audio: Path) -> tuple[str, str, str]:

@@ -12,7 +12,7 @@ from pathlib import Path
 import _bootstrap  # noqa: F401  (把仓库 app/ 加入 sys.path)
 
 from models import Book
-from state import VERIFIED, items_for, upsert_item
+from specargo.state import VERIFIED, items_for, upsert_item
 
 
 def upsert_tts_item(conn, *, book_slug: str, chapter_num: str, voice: str,

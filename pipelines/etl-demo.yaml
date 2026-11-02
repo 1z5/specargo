@@ -7,7 +7,6 @@ params:
   python: python3        # 解释器可配置：容器里可能是 python
   state_db: ""            # 由 CLI 注入；空则只跑不登记
   run_id: ""              # 由 Runner 注入，YAML 不赋值
-  app_dir: ""             # 由 Runner 注入（代码目录）
   work_dir: "out"         # 产物根目录：本地相对路径；集群由编译器注入 /output
 
 # 集群执行目标：spec2argo 编译器读取这一段生成 Argo CRD
@@ -37,7 +36,7 @@ variants: [""]            # 单变体
 stages:
   # ---- 抽取：产出 JSONL ----
   - name: extract
-    command: "{{params.python}} {{params.app_dir}}/etl_steps.py extract --partition {{partition.key}} --out {{params.work_dir}}/extract/{{partition.key}}.jsonl"
+    command: "{{params.python}} -m specargo.examples.etl_steps extract --partition {{partition.key}} --out {{params.work_dir}}/extract/{{partition.key}}.jsonl"
     outputs: [raw]
     artifacts:
       raw: "{{params.work_dir}}/extract/{{partition.key}}.jsonl"
@@ -49,7 +48,7 @@ stages:
 
   # ---- 转换：字段规范化 ----
   - name: transform
-    command: "{{params.python}} {{params.app_dir}}/etl_steps.py transform --in {{params.work_dir}}/extract/{{partition.key}}.jsonl --out {{params.work_dir}}/transform/{{partition.key}}.jsonl"
+    command: "{{params.python}} -m specargo.examples.etl_steps transform --in {{params.work_dir}}/extract/{{partition.key}}.jsonl --out {{params.work_dir}}/transform/{{partition.key}}.jsonl"
     dependencies: [extract]
     outputs: [clean]
     consumes: [raw]                     # 消费 extract 的产物（集群侧由对象存储 get）
@@ -63,7 +62,7 @@ stages:
 
   # ---- 装载：写入目标库（这里用落盘模拟）----
   - name: load
-    command: "{{params.python}} {{params.app_dir}}/etl_steps.py load --in {{params.work_dir}}/transform/{{partition.key}}.jsonl --out {{params.work_dir}}/load/{{partition.key}}.done"
+    command: "{{params.python}} -m specargo.examples.etl_steps load --in {{params.work_dir}}/transform/{{partition.key}}.jsonl --out {{params.work_dir}}/load/{{partition.key}}.done"
     dependencies: [transform]
     outputs: [marker]
     consumes: [clean]                    # 消费 transform 的产物

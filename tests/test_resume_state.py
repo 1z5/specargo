@@ -6,16 +6,16 @@
 运行：``python3 tests/test_resume_state.py``
 """
 from __future__ import annotations
+import importlib.util
 
 import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-from resume import (fingerprint, read_fingerprint, should_skip, skip_reason,  # noqa: E402
+from specargo.resume import (fingerprint, read_fingerprint, should_skip, skip_reason,  # noqa: E402
                     write_fingerprint)
-import state as st                                   # noqa: E402
+from specargo import state as st                                   # noqa: E402
 
 
 # ---------------------------------------------------------------------------

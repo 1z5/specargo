@@ -142,12 +142,12 @@ spec:
       args:
       - 'set -e
 
-        python3 /app/dataset_steps.py seed --partition {{inputs.parameters.partition}} --out /output/raw/{{inputs.parameters.partition}}.jsonl
+        python3 -m specargo.examples.dataset_steps seed --partition {{inputs.parameters.partition}} --out /output/raw/{{inputs.parameters.partition}}.jsonl
         --rows 20
 
         # 路径契约：上游只负责把产物写到约定 key，不依赖编排器的 artifact 配对
 
-        python3 /app/objstore.py put --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl" --file ''/output/raw/{{inputs.parameters.partition}}.jsonl'''
+        python3 -m specargo.objstore put --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl" --file ''/output/raw/{{inputs.parameters.partition}}.jsonl'''
       env:
       - name: PIPELINE_RUN_ID
         value: '{{workflow.name}}'
@@ -179,14 +179,15 @@ spec:
 
         # 路径契约：从上游产物取数（经对象存储，与节点无关）
 
-        python3 /app/objstore.py get --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl" --file ''/output/raw/{{inputs.parameters.partition}}.jsonl''
+        python3 -m specargo.objstore get --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl" --file ''/output/raw/{{inputs.parameters.partition}}.jsonl''
 
-        python3 /app/dataset_steps.py clean --in /output/raw/{{inputs.parameters.partition}}.jsonl --out /output/clean/{{inputs.parameters.partition}}.jsonl
+        python3 -m specargo.examples.dataset_steps clean --in /output/raw/{{inputs.parameters.partition}}.jsonl --out /output/clean/{{inputs.parameters.partition}}.jsonl
         --quarantine /output/quarantine/{{inputs.parameters.partition}}.jsonl
 
         # 路径契约：上游只负责把产物写到约定 key，不依赖编排器的 artifact 配对
 
-        python3 /app/objstore.py put --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/clean.jsonl" --file ''/output/clean/{{inputs.parameters.partition}}.jsonl'''
+        python3 -m specargo.objstore put --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/clean.jsonl" --file
+        ''/output/clean/{{inputs.parameters.partition}}.jsonl'''
       env:
       - name: PIPELINE_RUN_ID
         value: '{{workflow.name}}'
@@ -218,7 +219,8 @@ spec:
       args:
       - 'set -e
 
-        python3 /app/objstore.py get --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/clean.jsonl" --file ''/output/clean/{{inputs.parameters.partition}}.jsonl''
+        python3 -m specargo.objstore get --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/clean.jsonl" --file
+        ''/output/clean/{{inputs.parameters.partition}}.jsonl''
 
         cat > /tmp/gate_config.json <<''JSON''
 
@@ -240,7 +242,7 @@ spec:
 
         JSON
 
-        python3 /app/pipeline_cli.py gate --stage clean --artifact ''/output/clean/{{inputs.parameters.partition}}.jsonl''
+        python3 -m specargo.pipeline_cli gate --stage clean --artifact ''/output/clean/{{inputs.parameters.partition}}.jsonl''
         --checks ''["file_nonempty", "row_count"]'' --check-config-file /tmp/gate_config.json --run-id "$PIPELINE_RUN_ID"
 
         '
@@ -268,16 +270,18 @@ spec:
 
         # 路径契约：从上游产物取数（经对象存储，与节点无关）
 
-        python3 /app/objstore.py get --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/clean.jsonl" --file ''/output/clean/{{inputs.parameters.partition}}.jsonl''
+        python3 -m specargo.objstore get --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/clean.jsonl" --file
+        ''/output/clean/{{inputs.parameters.partition}}.jsonl''
 
-        python3 /app/dataset_steps.py shard --in /output/clean/{{inputs.parameters.partition}}.jsonl --out-dir /output/shards/{{inputs.parameters.partition}}
-        --shards {{workflow.parameters.shards}} --manifest /output/manifest/{{inputs.parameters.partition}}.json --dataset
-        raw_partition --version {{workflow.name}} --base-dir /output && python3 /app/manifest.py verify --manifest /output/manifest/{{inputs.parameters.partition}}.json
-        --base-dir /output
+        python3 -m specargo.examples.dataset_steps shard --in /output/clean/{{inputs.parameters.partition}}.jsonl --out-dir
+        /output/shards/{{inputs.parameters.partition}} --shards {{workflow.parameters.shards}} --manifest /output/manifest/{{inputs.parameters.partition}}.json
+        --dataset raw_partition --version {{workflow.name}} --base-dir /output && python3 -m specargo.examples.manifest verify
+        --manifest /output/manifest/{{inputs.parameters.partition}}.json --base-dir /output
 
         # 路径契约：上游只负责把产物写到约定 key，不依赖编排器的 artifact 配对
 
-        python3 /app/objstore.py put --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/manifest.jsonl" --file ''/output/manifest/{{inputs.parameters.partition}}.json'''
+        python3 -m specargo.objstore put --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/manifest.jsonl" --file
+        ''/output/manifest/{{inputs.parameters.partition}}.json'''
       env:
       - name: PIPELINE_RUN_ID
         value: '{{workflow.name}}'
@@ -309,7 +313,8 @@ spec:
       args:
       - 'set -e
 
-        python3 /app/objstore.py get --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/manifest.jsonl" --file ''/output/manifest/{{inputs.parameters.partition}}.json''
+        python3 -m specargo.objstore get --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/manifest.jsonl" --file
+        ''/output/manifest/{{inputs.parameters.partition}}.json''
 
         cat > /tmp/gate_config.json <<''JSON''
 
@@ -343,7 +348,7 @@ spec:
 
         JSON
 
-        python3 /app/pipeline_cli.py gate --stage shard --artifact ''/output/manifest/{{inputs.parameters.partition}}.json''
+        python3 -m specargo.pipeline_cli gate --stage shard --artifact ''/output/manifest/{{inputs.parameters.partition}}.json''
         --checks ''["file_nonempty", "json_schema"]'' --check-config-file /tmp/gate_config.json --run-id "$PIPELINE_RUN_ID"
 
         '
@@ -361,8 +366,6 @@ spec:
       value: python3
     - name: state_db
       value: ''
-    - name: app_dir
-      value: /app
     - name: work_dir
       value: /output
     - name: shards

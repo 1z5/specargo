@@ -16,7 +16,7 @@ import importlib
 import sys
 from pathlib import Path
 
-from spec import SpecError
+from .spec import SpecError
 
 
 def search_dirs_for(spec_path: str | None) -> list[Path]:

@@ -21,9 +21,7 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from manifest import Manifest, ShardInfo, file_sha256, shard_of  # noqa: E402
+from .manifest import Manifest, ShardInfo, file_sha256, shard_of
 
 _WS = re.compile(r"\s+")
 

@@ -16,7 +16,7 @@ sys.path.insert(0, str(_EXAMPLE_DIR.parents[1] / "app"))
 from domain_state import (expected_item_keys, reconcile,  # noqa: E402
                           scan_duplicate_files, upsert_tts_item)
 from models import Book, BookInfo, Chapter               # noqa: E402
-import state as st                                       # noqa: E402
+from specargo import state as st                                       # noqa: E402
 
 
 def _book(title: str = "Do What Matters", n_chapters: int = 3) -> Book:

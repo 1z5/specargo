@@ -74,7 +74,7 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
   `specargo:ci` / `specargo`；状态表 `pipeline_run` / `pipeline_item`，列
   `dataset` / `partition` / `variant`（旧库启动时原地迁移）。
 - **插件化**：框架层不再 `import checks_tts`；领域检查由 spec 顶层 `plugins: [模块名]`
-  经 `app/plugins.py` 显式加载（`examples → framework` 单向依赖）。
+  经 `specargo/plugins.py` 显式加载（`examples → framework` 单向依赖）。
 
 ## 下一步（P1）
 
@@ -91,15 +91,18 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 - `tests/golden/` + `tests/test_golden.py`：5 份 golden（普通/journal/podGC-off/领域插件），
   编译器行为变更必须 `python3 tests/update_golden.py` 显式更新，否则 drift 失败；
   drift 检测已用"改一个默认值"实测有效。
-- `app/runtime.py` `RuntimeConfig`：运行时配置从编译器里抽出，优先级
+- `src/specargo/runtime.py` `RuntimeConfig`：运行时配置从编译器里抽出，优先级
   内置默认 < spec `runtime:`（旧名 `k8s:` 兼容）< CLI `--runtime`；类型/未知字段/
   预留 env 在 load 期校验；`PIPELINE_RUN_ID` / `runs` 为固定契约（常量集中一处）。
 
-### 2. 包化（pip install 可用）
+### 2. 包化（已完成）
 
-`pyproject.toml` + `src/pipeline/` 包结构 + `[project.scripts]`；extras：`tts` / `s3` / `dev`。
-包化后 `$PYTHONPATH` 不再是运行前提，示例可以只当普通用户目录使用。
-（当前是单仓库脚本 + `sys.path` 注入的最小形态。）
+- `pyproject.toml` + `src/specargo/` 包结构 + `[project.scripts]`（`specargo` / `specargo-run` /
+  `specargo-compile` / `specargo-gate` / `specargo-service`）；extras：`s3` / `dev`。
+- 编译产物与 spec 命令统一为 `python3 -m specargo.<module>`，镜像改为 `pip install`
+  （不再 COPY 源文件、不再依赖 `/app/*.py`）。
+- `subprocess_env.child_env()` 让本地跑 demo 也不需要手动设 `PYTHONPATH`。
+- 测试与 examples 通过 bootstrap 兜底：已安装用包，未安装退回 `src/`。
 
 ### 3. `StateStore` 协议
 

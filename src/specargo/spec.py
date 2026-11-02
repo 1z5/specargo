@@ -261,7 +261,7 @@ def validate_spec(spec: PipelineSpec, *, path: str | Path = "") -> None:
         if not isinstance(key, str) or not _PARAM_NAME_RE.match(key):
             raise SpecError(f"{where}: 参数名 {key!r} 非法（只允许字母/数字/下划线）")
     # 执行目标配置校验（runtime/k8s 的字段与类型由 RuntimeConfig 统一校验）
-    from runtime import RuntimeConfig                     # 函数内 import：避免循环依赖
+    from .runtime import RuntimeConfig                     # 函数内 import：避免循环依赖
     RuntimeConfig.from_spec(spec)
 
     for module in spec.plugins:

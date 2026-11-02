@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from envcompat import (LEGACY_ARGO_ARTIFACT_DIR, LEGACY_ARGO_OUTPUT_DIR,
+from .envcompat import (LEGACY_ARGO_ARTIFACT_DIR, LEGACY_ARGO_OUTPUT_DIR,
                        LEGACY_ARGO_OUTPUTS, LEGACY_ARGO_PARAM_DIR, getenv)
 
 DEFAULT_PARAM_DIR = Path("/argo/outputs/parameters")

@@ -18,12 +18,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from checks import CheckResult, run_check
-from metrics import METRICS
-from spec import Partition, PipelineSpec, build_context, parse_duration, render
-from envcompat import LEGACY_RUN_ID, LEGACY_STATE_DB, getenv
-from plugins import load as load_plugins, search_dirs_for as plugin_search_dirs
-from state import (FAILED, GENERATED, VERIFIED, close_run, connect, get_item,
+from .checks import CheckResult, run_check
+from .metrics import METRICS
+from .spec import Partition, PipelineSpec, build_context, parse_duration, render
+from .envcompat import LEGACY_RUN_ID, LEGACY_STATE_DB, getenv
+from .plugins import load as load_plugins, search_dirs_for as plugin_search_dirs
+from .subprocess_env import child_env
+from .state import (FAILED, GENERATED, VERIFIED, close_run, connect, get_item,
                    open_run, reconcile_generic, upsert_item)
 
 
@@ -116,6 +117,7 @@ class Runner:
                 proc = subprocess.run(
                     command, shell=True, cwd=str(self.workdir),
                     capture_output=True, text=True, timeout=timeout or None,
+                    env=child_env(),     # 保证任务能 import specargo（-m 调用）
                 )
                 last_out = (proc.stdout or "") + (proc.stderr or "")
                 if proc.returncode == 0:
@@ -374,7 +376,7 @@ class Runner:
 
         # Argo 输出参数：让编排层拿到业务结果
         try:
-            from argo_io import write_params
+            from .argo_io import write_params
             write_params({
                 "run-id": self.run_id,
                 "status": "pass" if self.result.ok else "fail",
@@ -391,7 +393,7 @@ class Runner:
 def main() -> int:
     import argparse
 
-    from spec import load_spec
+    from .spec import load_spec
 
     parser = argparse.ArgumentParser(description="声明式批量任务执行器")
     parser.add_argument("spec", help="管线定义 YAML，如 pipelines/etl-demo.yaml")

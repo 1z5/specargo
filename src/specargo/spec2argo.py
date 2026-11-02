@@ -28,8 +28,12 @@
 
 用法::
 
-    python3 spec2argo.py pipelines/etl-demo.yaml -o /tmp/wf.yaml
+    specargo compile pipelines/etl-demo.yaml -o /tmp/wf.yaml
     argo lint --offline /tmp/wf.yaml
+
+调用形态（包化后）：编译产物用 ``python3 -m specargo.<module>`` 调用框架能力，
+不再依赖镜像里存在 ``/app/*.py`` 源文件——镜像只要 ``pip install specargo``。
+spec 里的业务命令同样推荐 ``-m your_package.your_module`` 形式。
 """
 from __future__ import annotations
 
@@ -42,8 +46,8 @@ from pathlib import Path
 
 import yaml
 
-from runtime import OBJSTORE_KEY_ROOT, RUN_ID_ENV, RuntimeConfig
-from spec import PipelineSpec, SpecError, Stage, load_spec
+from .runtime import OBJSTORE_KEY_ROOT, RUN_ID_ENV, RuntimeConfig
+from .spec import PipelineSpec, SpecError, Stage, load_spec
 
 # ---------------------------------------------------------------------------
 # 表达式翻译：spec 模板 → Argo 模板
@@ -136,7 +140,7 @@ def _objstore_put_snippet(artifacts: dict[str, str]) -> str:
     lines = ["# 路径契约：上游只负责把产物写到约定 key，不依赖编排器的 artifact 配对"]
     for name, path in artifacts.items():
         lines.append(
-            'python3 /app/objstore.py put --key "%s" --file %s'
+            'python3 -m specargo.objstore put --key "%s" --file %s'
             % (_artifact_key(name), shlex.quote(translate(path)))
         )
     return "\n".join(lines)
@@ -149,7 +153,7 @@ def _objstore_get_snippet(artifacts: dict[str, str]) -> str:
     lines = ["# 路径契约：从上游产物取数（经对象存储，与节点无关）"]
     for name, path in artifacts.items():
         lines.append(
-            'python3 /app/objstore.py get --key "%s" --file %s'
+            'python3 -m specargo.objstore get --key "%s" --file %s'
             % (_artifact_key(name), shlex.quote(translate(path)))
         )
     return "\n".join(lines)
@@ -200,7 +204,7 @@ def _discover_script(cmd: str, dataset: str, variants: list[str],
         "         for k in lines for v in variants]\n"
         "print(json.dumps(items, ensure_ascii=False))\n"
         "PY\n"
-        + ('python3 /app/objstore.py put --key '
+        + ('python3 -m specargo.objstore put --key '
            '"%s/$%s/_run/partitions.json" --file /tmp/out/items.json\n'
            % (OBJSTORE_KEY_ROOT, RUN_ID_ENV)
            if journal else '')
@@ -265,7 +269,7 @@ def _plugin_env(spec: PipelineSpec, runtime: RuntimeConfig) -> list[dict]:
 def _state_put_snippet(stage_name: str, status: str) -> str:
     """stage/gate 结束后把 item 终态写入对象存储状态日志（集群跨 Pod）。"""
     return (
-        'python3 /app/pipeline_cli.py state put-remote --run-id "$%s" ' % RUN_ID_ENV +
+        'python3 -m specargo.pipeline_cli state put-remote --run-id "$%s" ' % RUN_ID_ENV +
         '--dataset "{{inputs.parameters.dataset}}" '
         '--partition "{{inputs.parameters.partition}}" '
         '--variant "{{inputs.parameters.variant}}" '
@@ -291,12 +295,12 @@ def _gate_snippet(stage: Stage, spec: PipelineSpec, *, journal: bool = False) ->
     cfg = _resolve_for_gate(stage.check_config, spec=spec, artifact_path=local_path)
     lines = [
         "set -e",
-        'python3 /app/objstore.py get --key "%s" --file %s'
+        'python3 -m specargo.objstore get --key "%s" --file %s'
         % (_artifact_key(artifact_name), shlex.quote(local_path)),
         "cat > /tmp/gate_config.json <<'JSON'",
         json.dumps(cfg, ensure_ascii=False, indent=0),
         "JSON",
-        ("python3 /app/pipeline_cli.py gate --stage %s --artifact %s --checks '%s' "
+        ("python3 -m specargo.pipeline_cli gate --stage %s --artifact %s --checks '%s' "
          "--check-config-file /tmp/gate_config.json --run-id \"$%s\""
          % (shlex.quote(stage.name), shlex.quote(local_path),
             json.dumps(list(stage.checks), ensure_ascii=False), RUN_ID_ENV)),
@@ -336,7 +340,7 @@ def _on_exit_template(spec: PipelineSpec, *, image: str, pull_policy: str,
     lines = ["set -e"]
     if use_discover:
         lines += [
-            ("if ! python3 /app/objstore.py get "
+            ("if ! python3 -m specargo.objstore get "
              '--key "%s/$%s/_run/partitions.json" '
              "--file /tmp/partitions.json; then"
              % (OBJSTORE_KEY_ROOT, RUN_ID_ENV)),
@@ -354,7 +358,7 @@ def _on_exit_template(spec: PipelineSpec, *, image: str, pull_policy: str,
         lines += ["cat > /tmp/partitions.json <<'JSON'",
                   json.dumps(partition_items, ensure_ascii=False), "JSON"]
     lines.append(
-        ('python3 /app/pipeline_cli.py reconcile-journal --run-id "$%s" '
+        ('python3 -m specargo.pipeline_cli reconcile-journal --run-id "$%s" '
          "--partitions-file /tmp/partitions.json --final-stage %s "
          "--terminal-statuses '%s' --report-json /tmp/reconcile-report.json"
          % (RUN_ID_ENV, shlex.quote(final_stage), json.dumps(terminal_statuses))))
@@ -652,7 +656,7 @@ def main() -> int:
     text = yaml.safe_dump(wf, allow_unicode=True, sort_keys=False, width=120)
 
     header = ("# 由 spec2argo 从 %s 自动生成，请勿手改\n"
-              "# 重新生成：python3 app/spec2argo.py %s -o %s\n"
+              "# 重新生成：specargo compile %s -o %s\n"
               % (args.spec, args.spec, args.output or "<stdout>"))
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)

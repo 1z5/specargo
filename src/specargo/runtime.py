@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from spec import SpecError
+from .spec import SpecError
 
 # 固定契约：编译产物里注入/引用的 env 名与 key 根（不允许配置覆盖）
 RUN_ID_ENV = "PIPELINE_RUN_ID"

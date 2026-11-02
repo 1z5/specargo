@@ -22,11 +22,11 @@ from pathlib import Path
 
 from config import Config, config as default_config
 from domain_state import upsert_tts_item
-from envcompat import LEGACY_RUN_ID, LEGACY_STATE_DB, getenv
+from specargo.envcompat import LEGACY_RUN_ID, LEGACY_STATE_DB, getenv
 from models import Book
 from book_reader import read_book, find_book_json_files
-from resume import skip_reason
-from state import GENERATED, VERIFIED, connect, open_run
+from specargo.resume import skip_reason
+from specargo.state import GENERATED, VERIFIED, connect, open_run
 from text_composer import compose_opening, compose_chapter, compose_closing
 
 

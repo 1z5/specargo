@@ -2,7 +2,7 @@
 
 本文描述 **specargo** 的分层结构、模块职责、插件机制与数据流转。
 核心目标：**同一份 YAML spec，本地 runner 可跑，也能编译成 Argo CRD 上集群**；
-框架层（`app/`）不含任何领域知识，领域能力通过插件显式加载。
+框架层（`src/specargo/`，pip install 可用）不含任何领域知识，领域能力通过插件显式加载。
 
 ## 0. 组成
 
@@ -304,7 +304,8 @@ onExit     ─► pipeline_cli.py reconcile-journal（同一 evaluate_items 判�
 docker build -t specargo:ci .        # 构建上下文为仓库根
 ```
 
-`Dockerfile` 只包含 `app/`（框架层，纯标准库 + PyYAML）与 `moto[server]`；
+`Dockerfile` 把 `specargo` 包 `pip install` 进镜像（框架层，纯标准库 + PyYAML）并装 `moto[server]`；
+编译产物用 `python3 -m specargo.<module>` 调用框架能力，不依赖镜像里的源文件。
 领域示例的镜像在 `examples/tts-asr/Dockerfile`（含 openai / faster-whisper 重依赖），不属于通用镜像。
 
 ---

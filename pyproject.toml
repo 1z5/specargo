@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "specargo"
+version = "0.1.0"
+description = "声明式批量数据管线框架：一份 spec 本地可跑，也能编译成 Argo Workflows CRD 上集群"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Zhu Quanzhi" }]
+keywords = ["data-pipeline", "argo-workflows", "batch-processing", "etl", "data-quality"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Distributed Computing",
+]
+# 框架层零重依赖：只依赖 YAML 解析。领域示例的重依赖（openai / faster-whisper）
+# 在 examples/tts-asr/requirements.txt，S3 支持走 extras。
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+s3 = ["boto3>=1.28"]          # S3ArtifactStore / 集群对象存储
+dev = ["pytest>=7"]           # 可选：套件也可直接 python3 tests/test_*.py 跑
+
+[project.urls]
+Homepage = "https://github.com/1z5/specargo"
+Repository = "https://github.com/1z5/specargo"
+Documentation = "https://github.com/1z5/specargo/tree/main/docs"
+
+[project.scripts]
+specargo = "specargo.cli:main"
+specargo-run = "specargo.runner:main"
+specargo-compile = "specargo.spec2argo:main"
+specargo-gate = "specargo.pipeline_cli:main"
+specargo-service = "specargo.service:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["specargo*"]
+
+[tool.setuptools.package-data]
+specargo = ["py.typed"]

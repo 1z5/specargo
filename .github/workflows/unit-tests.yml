@@ -4,7 +4,7 @@ name: unit-tests
 # 与 k8s-smoke 互补——smoke 验证集群编排，本 job 守护代码正确性。
 on:
   push:
-    paths: ["app/**", "examples/**", "pipelines/**", "tests/**", "k8s/**",
+    paths: ["src/**", "examples/**", "pipelines/**", "tests/**", "k8s/**",
             "Dockerfile", ".github/workflows/unit-tests.yml"]
   pull_request:
   workflow_dispatch:
@@ -32,19 +32,23 @@ jobs:
           set -e
           python3 -m pip install --upgrade pip
           python3 -m pip install "PyYAML>=6.0"
+          # 包化后以 editable install 验证「pip install 可用」这条属性
+          python3 -m pip install -e .
+          python3 -c "import specargo; print('specargo', specargo.__version__)"
 
-      - name: 框架层纯净度守卫（领域词不得泄漏到 app/）
+      - name: 框架层纯净度守卫（领域词不得泄漏到框架包）
         run: |
           set -e
           # envcompat.py / legacy_state_migration.py 是唯一的旧前缀兼容层，允许例外。
-          MATCHES=$(grep -rniE '(^|[^A-Za-z0-9])(tts|asr|audiobook|narration|book|chapter|voice|audio|openai|speech|whisper|azure|cedar|marin)([^A-Za-z]|$)|音色|书籍|章节|语音|音频' app/ --exclude-dir='__pycache__' \
-            | grep -vE 'app/(envcompat|legacy_state_migration)\.py' || true)
+          MATCHES=$(grep -rniE '(^|[^A-Za-z0-9])(tts|asr|audiobook|narration|book|chapter|voice|audio|openai|speech|whisper|azure|cedar|marin)([^A-Za-z]|$)|音色|书籍|章节|语音|音频' src/ --exclude-dir='__pycache__' \
+                    --exclude-dir='*.egg-info' \
+                    | grep -vE 'src/specargo/(envcompat|legacy_state_migration)\.py' || true)
           if [ -n "$MATCHES" ]; then
             echo "❌ 框架层出现领域残留（应放到 examples/）："
             echo "$MATCHES"
             exit 1
           fi
-          echo "✅ app/ 无领域词泄漏"
+          echo "✅ 框架包无领域词泄漏"
 
       - name: 校验无隐式依赖（import 全部框架模块）
         run: |

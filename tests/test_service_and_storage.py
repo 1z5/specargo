@@ -1,5 +1,6 @@
 """常驻服务 + 对象存储 + 指标 的测试（真实起服务，不用 mock）。"""
 from __future__ import annotations
+import importlib.util
 
 import json
 import signal
@@ -10,10 +11,16 @@ import time
 import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-from artifacts import LocalArtifactStore, make_store          # noqa: E402
-from metrics import Counter, Gauge, Histogram, Metrics         # noqa: E402
+ROOT = Path(__file__).resolve().parents[1]
+# 优先用已安装的包（pip install -e .）；未安装时退回 src/（不依赖安装也能跑测试）
+_SRC = ROOT / "src"
+if str(_SRC) not in sys.path and not importlib.util.find_spec("specargo"):
+    sys.path.insert(0, str(_SRC))
+
+import specargo  # noqa: E402  (供 specargo.__file__ 定位包目录)
+from specargo.artifacts import LocalArtifactStore, make_store          # noqa: E402
+from specargo.metrics import Counter, Gauge, Histogram, Metrics         # noqa: E402
 
 
 # ===================== 对象存储 =====================
@@ -48,7 +55,7 @@ def test_artifact_store_rejects_path_traversal():
                 raise AssertionError(f"应拒绝非法 key: {bad}")
             except ValueError:
                 pass
-        import artifacts
+        from specargo import artifacts
         for bad in ("..", ".", "", "a/../b"):
             try:
                 artifacts._normalize_key(bad)
@@ -63,7 +70,7 @@ def test_s3_list_prefix_keeps_trailing_slash_semantics():
     本地实现是目录语义、S3 是字符串前缀语义；两者对"带尾斜杠的目录前缀"
     必须表现一致。这里直接测前缀构造（S3 构造依赖 boto3，CI 不装）。
     """
-    from artifacts import S3ArtifactStore
+    from specargo.artifacts import S3ArtifactStore
 
     f = S3ArtifactStore._list_prefix
     assert f("p", "runs/r1/") == "p/runs/r1/", f("p", "runs/r1/")
@@ -132,7 +139,7 @@ def test_metrics_file_output_is_atomic():
 
 def test_module_level_singleton_is_usable():
     """模块级单例必须可直接用（防模块名与实例名碰撞的坑）。"""
-    import metrics as m
+    from specargo import metrics as m
     assert hasattr(m, "METRICS"), "单例名不能与模块名相同"
     m.METRICS.inflight.inc(2, stage="x")
     assert "pipeline_inflight" in m.render()
@@ -177,10 +184,10 @@ def _post(port: int, path: str, body: dict | None = None):
 def test_service_lifecycle_probes_tasks_graceful_shutdown():
     port = _free_port()
     env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "SERVICE_VERSION": "test-1",
-           "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "app")}
+           "PYTHONPATH": str(Path(specargo.__file__).parent)}
     proc = subprocess.Popen(
-        [sys.executable, "-m", "service", "--port", str(port), "--workers", "2"],
-        cwd=str(Path(__file__).resolve().parents[1] / "app"), env=env,
+        [sys.executable, "-m", "specargo.service", "--port", str(port), "--workers", "2"],
+        cwd=str(Path(specargo.__file__).parent), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         # 等服务就绪
@@ -262,13 +269,13 @@ def test_service_with_state_db_is_ready_and_persists_items():
     现有用例都传 state_db=None，所以 CI 抓不到。
     """
     port = _free_port()
-    app_dir = Path(__file__).resolve().parents[1] / "app"
+    app_dir = Path(specargo.__file__).parent
     env = {"PATH": "/usr/bin:/bin:/usr/local/bin",
            "PYTHONPATH": str(app_dir)}
     with tempfile.TemporaryDirectory() as d:
         db = Path(d) / "svc.db"
         proc = subprocess.Popen(
-            [sys.executable, "-m", "service", "--port", str(port),
+            [sys.executable, "-m", "specargo.service", "--port", str(port),
              "--state-db", str(db), "--workers", "2"],
             cwd=str(app_dir), env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -316,8 +323,8 @@ def test_service_with_state_db_is_ready_and_persists_items():
 def test_service_rejects_new_tasks_while_draining():
     """停机中拒绝新任务（对应 K8s 滚动升级时不能丢流量到旧 Pod）。"""
     import importlib
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
-    service_mod = importlib.import_module("service")
+    sys.path.insert(0, str(_SRC))
+    service_mod = importlib.import_module("specargo.service")
     svc = service_mod.Service(workers=2)
     assert svc.submit({"payload": "x", "delay": 0.01})
     svc.draining = True
@@ -334,7 +341,7 @@ def test_service_rejects_new_tasks_while_draining():
 def test_retry_uses_original_payload():
     """retry 必须用原始 payload 重跑，而不是空参数（静默错误结果回归）。"""
     import importlib
-    service_mod = importlib.import_module("service")
+    service_mod = importlib.import_module("specargo.service")
 
     class FlakyProcessor(service_mod.Processor):
         """第一次按 payload 抛错，第二次成功——用来验证重试真的带上了原文。"""
@@ -378,7 +385,7 @@ def test_objstore_local_mode_roundtrip():
     import importlib
     import os
 
-    objstore = importlib.import_module("objstore")
+    objstore = importlib.import_module("specargo.objstore")
     with tempfile.TemporaryDirectory() as d:
         os.environ["OBJSTORE_KIND"] = "local"
         os.environ["OBJSTORE_ROOT"] = d
@@ -410,7 +417,7 @@ def test_objstore_cli_exit_codes():
     import subprocess
     import sys
 
-    app_dir = Path(__file__).resolve().parents[1] / "app"
+    app_dir = Path(specargo.__file__).parent
     with tempfile.TemporaryDirectory() as d:
         env = dict(os.environ)
         env["OBJSTORE_KIND"] = "local"
@@ -418,17 +425,17 @@ def test_objstore_cli_exit_codes():
         src = Path(d) / "a.jsonl"
         src.write_text("x\n", encoding="utf-8")
 
-        p = subprocess.run([sys.executable, "objstore.py", "put",
+        p = subprocess.run([sys.executable, "-m", "specargo.objstore", "put",
                             "--key", "runs/r/1/raw.jsonl", "--file", str(src)],
                            cwd=app_dir, env=env, capture_output=True, text=True)
         assert p.returncode == 0, p.stderr
 
-        p = subprocess.run([sys.executable, "objstore.py", "exists",
+        p = subprocess.run([sys.executable, "-m", "specargo.objstore", "exists",
                             "--key", "runs/r/1/raw.jsonl"],
                            cwd=app_dir, env=env, capture_output=True, text=True)
         assert p.returncode == 0 and p.stdout.strip() == "true", (p.returncode, p.stdout)
 
-        p = subprocess.run([sys.executable, "objstore.py", "exists",
+        p = subprocess.run([sys.executable, "-m", "specargo.objstore", "exists",
                             "--key", "runs/r/2/raw.jsonl"],
                            cwd=app_dir, env=env, capture_output=True, text=True)
         assert p.returncode == 1 and p.stdout.strip() == "false", (p.returncode, p.stdout)

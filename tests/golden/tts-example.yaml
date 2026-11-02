@@ -77,7 +77,8 @@ spec:
 
         # 路径契约：上游只负责把产物写到约定 key，不依赖编排器的 artifact 配对
 
-        python3 /app/objstore.py put --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/audio.jsonl" --file ''output/{{inputs.parameters.partition}}'''
+        python3 -m specargo.objstore put --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/audio.jsonl" --file
+        ''output/{{inputs.parameters.partition}}'''
       env:
       - name: PIPELINE_RUN_ID
         value: '{{workflow.name}}'
@@ -111,7 +112,8 @@ spec:
 
         # 路径契约：上游只负责把产物写到约定 key，不依赖编排器的 artifact 配对
 
-        python3 /app/objstore.py put --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/report.jsonl" --file ''output/{{inputs.parameters.partition}}/verify_report/report.json'''
+        python3 -m specargo.objstore put --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/report.jsonl" --file
+        ''output/{{inputs.parameters.partition}}/verify_report/report.json'''
       env:
       - name: PIPELINE_RUN_ID
         value: '{{workflow.name}}'
@@ -142,7 +144,8 @@ spec:
       args:
       - 'set -e
 
-        python3 /app/objstore.py get --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/report.jsonl" --file ''output/{{inputs.parameters.partition}}/verify_report/report.json''
+        python3 -m specargo.objstore get --key "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/report.jsonl" --file
+        ''output/{{inputs.parameters.partition}}/verify_report/report.json''
 
         cat > /tmp/gate_config.json <<''JSON''
 
@@ -160,7 +163,7 @@ spec:
 
         JSON
 
-        python3 /app/pipeline_cli.py gate --stage verify --artifact ''output/{{inputs.parameters.partition}}/verify_report/report.json''
+        python3 -m specargo.pipeline_cli gate --stage verify --artifact ''output/{{inputs.parameters.partition}}/verify_report/report.json''
         --checks ''["asr_three_state"]'' --check-config-file /tmp/gate_config.json --run-id "$PIPELINE_RUN_ID"
 
         '

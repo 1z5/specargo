@@ -12,7 +12,7 @@
 
 自定义检查::
 
-    from checks import register
+    from .checks import register
 
     @register("my_check")
     def my_check(artifact: Path, config: dict, ctx: dict) -> CheckResult:
@@ -134,7 +134,8 @@ def _command(artifact: Path, config: dict, ctx: dict) -> CheckResult:
     领域专用检查也可以走插件注册表（``@register``），二者共用同一套
     gate 执行语义。
     """
-    from spec import render
+    from .spec import render
+    from .subprocess_env import child_env
 
     cmd = config.get("run", "")
     if not cmd:
@@ -144,7 +145,8 @@ def _command(artifact: Path, config: dict, ctx: dict) -> CheckResult:
     rendered = render(cmd, context)
     # 与任务同工作目录执行（框架在 ctx 里注入 workdir；单测可直接调 run_check 不带该键）
     cwd = context.get("workdir") or None
-    proc = subprocess.run(rendered, shell=True, capture_output=True, text=True, cwd=cwd)
+    proc = subprocess.run(rendered, shell=True, capture_output=True, text=True,
+                          cwd=cwd, env=child_env())
     ok = proc.returncode == 0
     return CheckResult(ok, metric=str(proc.returncode),
                        detail=(proc.stdout or "") + (proc.stderr or ""))

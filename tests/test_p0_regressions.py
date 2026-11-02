@@ -16,6 +16,7 @@
     python3 tests/test_p0_regressions.py
 """
 from __future__ import annotations
+import importlib.util
 
 import json
 import sys
@@ -25,12 +26,11 @@ from pathlib import Path
 
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-from runner import Runner                                    # noqa: E402
-from spec import Partition, PipelineSpec, SpecError, Stage, load_spec  # noqa: E402
-from spec2argo import compile_workflow, translate            # noqa: E402
-import state as st                                           # noqa: E402
+from specargo.runner import Runner                                    # noqa: E402
+from specargo.spec import Partition, PipelineSpec, SpecError, Stage, load_spec  # noqa: E402
+from specargo.spec2argo import compile_workflow, translate            # noqa: E402
+from specargo import state as st                                           # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINES = ROOT / "pipelines"
@@ -180,8 +180,8 @@ def test_compile_emits_workflow_arguments():
     wf = _compile(PIPELINES / "dataset-build.yaml")
     args = {p["name"]: p["value"] for p in wf["spec"]["arguments"]["parameters"]}
     assert args["python"] == "python3"
-    assert args["app_dir"] == "/app"
     assert args["work_dir"] == "/output"
+    assert "app_dir" not in args, "包化后不再有 app_dir 占位（业务命令用 -m 调用）"
     assert args["shards"] == "2", args
 
 
@@ -242,8 +242,8 @@ def test_compile_gate_fetches_artifact_before_check():
     wf = _compile(PIPELINES / "etl-demo.yaml")
     gate = next(t for t in wf["spec"]["templates"] if t["name"] == "gate-extract")
     script = gate["container"]["args"][0]
-    get_pos = script.find("objstore.py get")
-    check_pos = script.find("pipeline_cli.py gate")
+    get_pos = script.find("specargo.objstore get")
+    check_pos = script.find("specargo.pipeline_cli gate")
     assert get_pos >= 0 and check_pos > get_pos, script
     assert "runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl" in script
     env = {e["name"]: e["value"] for e in gate["container"]["env"]}
@@ -255,7 +255,7 @@ def test_compile_resolves_check_config_params():
     spec_file = _write_spec(
         "name: gatecfg\n"
         "k8s: {image: demo:ci}\n"
-        "params: {python: python3, app_dir: '', work_dir: out, marker: ok}\n"
+        "params: {python: python3, work_dir: out, marker: ok}\n"
         "partitions: {from: list, items: [{dataset: ds, key: k1}]}\n"
         "stages:\n"
         "  - name: s1\n"
@@ -265,7 +265,7 @@ def test_compile_resolves_check_config_params():
         "    checks: [command]\n"
         "    check_config:\n"
         "      command:\n"
-        "        run: \"test -s {{artifact}} && grep -q {{params.marker}} {{params.app_dir}}/x\"\n"
+        "        run: \"test -s {{artifact}} && grep -q {{params.marker}} /x\"\n"
     )
     wf = compile_workflow(load_spec(spec_file))
     gate = next(t for t in wf["spec"]["templates"] if t["name"] == "gate-s1")
@@ -274,7 +274,7 @@ def test_compile_resolves_check_config_params():
     run_cmd = json.loads(cfg_text)["command"]["run"]
     assert "{{params." not in run_cmd and "{{artifact}}" not in run_cmd, run_cmd
     assert "test -s /output/k1.txt" in run_cmd, run_cmd      # {{artifact}} 已解析
-    assert "grep -q ok /app/x" in run_cmd, run_cmd           # params 已解析为字面量
+    assert "grep -q ok /x" in run_cmd, run_cmd               # params 已解析为字面量
 
 
 def test_compile_quotes_artifact_paths_with_spaces():
@@ -322,7 +322,7 @@ def test_compile_injects_plugins_into_gate():
     assert env["PIPELINE_PLUGIN_PATH"] == "/app/examples/demo", env
     script = gate["container"]["args"][0]
     # 插件声明通过 env 注入，由 pipeline_cli 内部加载（不再内联 Python）
-    assert "pipeline_cli.py gate" in script, script
+    assert "specargo.pipeline_cli gate" in script, script
     assert "from plugins import load" not in script, script
 
 
@@ -347,12 +347,12 @@ def test_dataset_pipeline_self_verifies_in_stage_for_cluster_gate():
     """
     spec = load_spec(PIPELINES / "dataset-build.yaml")
     shard_stage = next(s for s in spec.stages if s.name == "shard")
-    assert "manifest.py verify" in shard_stage.command, shard_stage.command
+    assert "specargo.examples.manifest verify" in shard_stage.command, shard_stage.command
     assert shard_stage.checks == ["file_nonempty", "json_schema"], shard_stage.checks
     wf = compile_workflow(spec)
     gate = next(t for t in wf["spec"]["templates"] if t["name"] == "gate-shard")
     script = gate["container"]["args"][0]
-    assert "manifest.py verify" not in script, script
+    assert "manifest verify" not in script, script
 
 
 def test_unicode_partition_keys_allowed():

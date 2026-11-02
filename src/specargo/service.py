@@ -45,11 +45,11 @@ try:
 except Exception:                                     # pragma: no cover
     _metrics = None
 try:
-    from state import FAILED, GENERATED, VERIFIED, connect, upsert_item
+    from .state import FAILED, GENERATED, VERIFIED, connect, upsert_item
 except Exception:                                     # pragma: no cover
     connect = None
 
-from envcompat import LEGACY_STATE_DB, getenv
+from .envcompat import LEGACY_STATE_DB, getenv
 
 VERSION = os.getenv("SERVICE_VERSION", "dev")
 

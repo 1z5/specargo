@@ -14,7 +14,6 @@ params:
   python: python3
   state_db: ""              # 由 CLI 注入；空则只跑不登记
   run_id: ""                # 由 Runner 注入，YAML 不赋值
-  app_dir: ""               # 由 Runner 注入（代码目录）
   work_dir: "out"           # 产物根目录：本地相对路径；集群由编译器注入 /output
   shards: "2"               # 每个分区切成几片
 
@@ -43,7 +42,7 @@ variants: [""]              # 单变体；ETL 场景里可以是版本号/环境
 stages:
   # ---------------- 1. 原始数据（可替换为真实数据源） ----------------
   - name: seed
-    command: "{{params.python}} {{params.app_dir}}/dataset_steps.py seed --partition {{partition.key}} --out {{params.work_dir}}/raw/{{partition.key}}.jsonl --rows 20"
+    command: "{{params.python}} -m specargo.examples.dataset_steps seed --partition {{partition.key}} --out {{params.work_dir}}/raw/{{partition.key}}.jsonl --rows 20"
     outputs: [raw]
     artifacts:
       raw: "{{params.work_dir}}/raw/{{partition.key}}.jsonl"
@@ -53,7 +52,7 @@ stages:
   # ---------------- 2. 清洗：schema + 去重 + 规范化 ----------------
   - name: clean
     dependencies: [seed]
-    command: "{{params.python}} {{params.app_dir}}/dataset_steps.py clean --in {{params.work_dir}}/raw/{{partition.key}}.jsonl --out {{params.work_dir}}/clean/{{partition.key}}.jsonl --quarantine {{params.work_dir}}/quarantine/{{partition.key}}.jsonl"
+    command: "{{params.python}} -m specargo.examples.dataset_steps clean --in {{params.work_dir}}/raw/{{partition.key}}.jsonl --out {{params.work_dir}}/clean/{{partition.key}}.jsonl --quarantine {{params.work_dir}}/quarantine/{{partition.key}}.jsonl"
     outputs: [clean]
     consumes: [raw]
     artifacts:
@@ -70,7 +69,7 @@ stages:
     # 深度自校验放在本 stage 命令内：manifest.py verify 需要 shards 文件，
     # 而 shards 目录不是单文件 artifact、无法被跨 Pod gate get（见 ROADMAP 已知边界）。
     # 这样本地 runner 与集群执行在同一进程内完成"分片齐全 + 校验和 + 条数"校验。
-    command: "{{params.python}} {{params.app_dir}}/dataset_steps.py shard --in {{params.work_dir}}/clean/{{partition.key}}.jsonl --out-dir {{params.work_dir}}/shards/{{partition.key}} --shards {{params.shards}} --manifest {{params.work_dir}}/manifest/{{partition.key}}.json --dataset raw_partition --version {{params.run_id}} --base-dir {{params.work_dir}} && {{params.python}} {{params.app_dir}}/manifest.py verify --manifest {{params.work_dir}}/manifest/{{partition.key}}.json --base-dir {{params.work_dir}}"
+    command: "{{params.python}} -m specargo.examples.dataset_steps shard --in {{params.work_dir}}/clean/{{partition.key}}.jsonl --out-dir {{params.work_dir}}/shards/{{partition.key}} --shards {{params.shards}} --manifest {{params.work_dir}}/manifest/{{partition.key}}.json --dataset raw_partition --version {{params.run_id}} --base-dir {{params.work_dir}} && {{params.python}} -m specargo.examples.manifest verify --manifest {{params.work_dir}}/manifest/{{partition.key}}.json --base-dir {{params.work_dir}}"
     outputs: [manifest]
     consumes: [clean]
     artifacts:

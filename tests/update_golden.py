@@ -10,6 +10,7 @@
     python3 tests/update_golden.py --diff     # 只显示与现有 golden 的差异摘要
 """
 from __future__ import annotations
+import importlib.util
 
 import json
 import sys
@@ -18,12 +19,14 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "app"
+# 优先用已安装的包（pip install -e .）；未安装时退回 src/（不依赖安装也能跑测试）
+_SRC = ROOT / "src"
+if str(_SRC) not in sys.path and not importlib.util.find_spec("specargo"):
+    sys.path.insert(0, str(_SRC))
 GOLDEN = ROOT / "tests" / "golden"
-sys.path.insert(0, str(APP))
 
-from spec import load_spec                                    # noqa: E402
-from spec2argo import compile_workflow                         # noqa: E402
+from specargo.spec import load_spec                                    # noqa: E402
+from specargo.spec2argo import compile_workflow                         # noqa: E402
 
 HEADER = """# Golden 编译产物（由 tests/update_golden.py 生成，请勿手改）
 # 用途：锁住 spec2argo 的编译行为——编译器变更必须显式更新 golden，

@@ -8,3 +8,10 @@ verify_report/
 *.db-wal
 *.db-shm
 *.prom
+
+# 打包/安装产物
+*.egg-info/
+*.egg
+build/
+dist/
+.venv/

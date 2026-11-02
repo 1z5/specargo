@@ -4,6 +4,7 @@
 checks / 状态 / 对账实现，而不是各写一份。
 """
 from __future__ import annotations
+import importlib.util
 
 import json
 import os
@@ -13,15 +14,19 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "app"
-sys.path.insert(0, str(APP))
+# 优先用已安装的包（pip install -e .）；未安装时退回 src/（不依赖安装也能跑测试）
+_SRC = ROOT / "src"
+if str(_SRC) not in sys.path and not importlib.util.find_spec("specargo"):
+    sys.path.insert(0, str(_SRC))
 
-from checks import run_check                                    # noqa: E402
-from spec import load_spec                                      # noqa: E402
-from spec2argo import compile_workflow                          # noqa: E402
-import journal                                                  # noqa: E402
-import notify                                                   # noqa: E402
-import state as st                                              # noqa: E402
+import specargo  # noqa: E402  (供 specargo.__file__ 定位包目录)
+
+from specargo.checks import run_check                                    # noqa: E402
+from specargo.spec import load_spec                                      # noqa: E402
+from specargo.spec2argo import compile_workflow                          # noqa: E402
+from specargo import journal                                     # noqa: E402
+from specargo import notify                                     # noqa: E402
+from specargo import state as st                                # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -65,21 +70,21 @@ k8s:
   journal: true
   notify_webhook: ""
   objstore_env: {OBJSTORE_BUCKET: argo-artifacts}
-params: {python: python3, run_id: "", app_dir: "", work_dir: "out"}
+params: {python: python3, run_id: "", work_dir: "out"}
 partitions:
   from: list
   items: [{dataset: ds, key: "1"}]
 variants: [""]
 stages:
   - name: extract
-    command: "{{params.python}} {{params.app_dir}}/etl_steps.py extract --partition {{partition.key}} --out {{params.work_dir}}/extract/{{partition.key}}.jsonl"
+    command: "{{params.python}} -m specargo.examples.etl_steps extract --partition {{partition.key}} --out {{params.work_dir}}/extract/{{partition.key}}.jsonl"
     outputs: [raw]
     artifacts: {raw: "{{params.work_dir}}/extract/{{partition.key}}.jsonl"}
     checks: [file_nonempty]
     timeout: 5m
   - name: load
     dependencies: [extract]
-    command: "{{params.python}} {{params.app_dir}}/etl_steps.py load --in {{params.work_dir}}/extract/{{partition.key}}.jsonl --out {{params.work_dir}}/load/{{partition.key}}.done"
+    command: "{{params.python}} -m specargo.examples.etl_steps load --in {{params.work_dir}}/extract/{{partition.key}}.jsonl --out {{params.work_dir}}/load/{{partition.key}}.done"
     outputs: [marker]
     artifacts: {marker: "{{params.work_dir}}/load/{{partition.key}}.done"}
     consumes: [raw]
@@ -97,7 +102,7 @@ def test_cli_gate_builtin_checks():
         good.write_text('{"order_id":"1","amount":1,"dt":"x"}\n', encoding="utf-8")
         bad = Path(d) / "bad.jsonl"
         bad.write_text("", encoding="utf-8")
-        cmd = [sys.executable, str(APP / "pipeline_cli.py"), "gate",
+        cmd = [sys.executable, "-m", "specargo.pipeline_cli", "gate",
                "--stage", "s1", "--artifact", str(good),
                "--checks", '["file_nonempty"]']
         assert subprocess.run(cmd, capture_output=True).returncode == 0
@@ -110,7 +115,7 @@ def test_cli_gate_loads_domain_plugin_from_env():
     with tempfile.TemporaryDirectory() as d:
         plug_dir = Path(d)
         (plug_dir / "my_domain_checks.py").write_text(
-            "from checks import CheckResult, register\n"
+            "from specargo.checks import CheckResult, register\n"
             "@register('my_domain_check')\n"
             "def my_domain_check(artifact, config, ctx):\n"
             "    return CheckResult(True, metric='ok')\n", encoding="utf-8")
@@ -120,7 +125,7 @@ def test_cli_gate_loads_domain_plugin_from_env():
         env["PIPELINE_PLUGINS"] = '["my_domain_checks"]'
         env["PIPELINE_PLUGIN_PATH"] = str(plug_dir)
         p = subprocess.run(
-            [sys.executable, str(APP / "pipeline_cli.py"), "gate",
+            [sys.executable, "-m", "specargo.pipeline_cli", "gate",
              "--stage", "s1", "--artifact", str(art),
              "--checks", '["my_domain_check"]'],
             capture_output=True, text=True, env=env)
@@ -131,7 +136,7 @@ def test_cli_gate_loads_domain_plugin_from_env():
 def test_cli_state_put_writes_sqlite():
     with tempfile.TemporaryDirectory() as d:
         db = Path(d) / "s.db"
-        cmd = [sys.executable, str(APP / "pipeline_cli.py"), "state", "put",
+        cmd = [sys.executable, "-m", "specargo.pipeline_cli", "state", "put",
                "--state-db", str(db), "--dataset", "ds", "--partition", "1",
                "--stage", "load", "--status", "verified", "--run-id", "r1"]
         assert subprocess.run(cmd, capture_output=True).returncode == 0
@@ -159,7 +164,7 @@ def test_journal_roundtrip_and_reconcile_cli():
             env = dict(os.environ)
             env.update({"OBJSTORE_KIND": "local",
                         "OBJSTORE_ROOT": str(root / "artifacts")})
-            cmd = [sys.executable, str(APP / "pipeline_cli.py"),
+            cmd = [sys.executable, "-m", "specargo.pipeline_cli",
                    "reconcile-journal", "--run-id", "r1",
                    "--partitions-file", str(parts), "--final-stage", "load",
                    "--report-json", str(root / "report.json")]
@@ -202,7 +207,7 @@ def test_compile_journal_emits_on_exit_and_state_puts():
 
     gate = next(t for t in wf["spec"]["templates"] if t["name"] == "gate-extract")
     gate_script = gate["container"]["args"][0]
-    assert "--journal" in gate_script and "pipeline_cli.py gate" in gate_script
+    assert "--journal" in gate_script and "specargo.pipeline_cli gate" in gate_script
 
     on_exit = next(t for t in wf["spec"]["templates"] if t["name"] == "on-exit")
     ox = on_exit["container"]["args"][0]
@@ -240,7 +245,7 @@ def test_discover_journal_writes_partitions_manifest():
     wf = compile_workflow(spec)
     disc = next(t for t in wf["spec"]["templates"] if t["name"] == "discover-scan")
     script = disc["script"]["args"][0]
-    assert "_run/partitions.json" in script and "objstore.py put" in script
+    assert "_run/partitions.json" in script and "specargo.objstore put" in script
     # onExit 走 discover 分支：从对象存储取分区清单，取不到则跳过
     on_exit = next(t for t in wf["spec"]["templates"] if t["name"] == "on-exit")
     ox = on_exit["container"]["args"][0]
@@ -255,14 +260,14 @@ ETL_DISCOVER_SPEC = """\
 name: discover-demo
 k8s:
   image: specargo:ci
-params: {python: python3, run_id: "", app_dir: "", work_dir: "out"}
+params: {python: python3, run_id: "", work_dir: "out"}
 partitions:
   from: discover
   dataset: dwd_order
   command: "printf '%s\\n' 1"
 stages:
   - name: extract
-    command: "{{params.python}} {{params.app_dir}}/etl_steps.py extract --partition {{partition.key}} --out {{params.work_dir}}/extract/{{partition.key}}.jsonl"
+    command: "{{params.python}} -m specargo.examples.etl_steps extract --partition {{partition.key}} --out {{params.work_dir}}/extract/{{partition.key}}.jsonl"
     outputs: [raw]
     artifacts: {raw: "{{params.work_dir}}/extract/{{partition.key}}.jsonl"}
     checks: [file_nonempty]
@@ -274,7 +279,7 @@ def _fix(script: str, partition: str, output_dir: Path) -> str:
     return (script.replace("{{inputs.parameters.partition}}", partition)
                   .replace("{{inputs.parameters.dataset}}", "ds")
                   .replace("{{inputs.parameters.variant}}", "")
-                  .replace("/app/", str(APP) + "/")
+                  .replace("/app/", "")
                   .replace("/output/", str(output_dir) + "/"))
 
 
@@ -349,7 +354,7 @@ def test_webhook_failure_does_not_change_reconcile_verdict():
             env.update({"OBJSTORE_KIND": "local",
                         "OBJSTORE_ROOT": str(root / "artifacts")})
             p = subprocess.run(
-                [sys.executable, str(APP / "pipeline_cli.py"), "reconcile-journal",
+                [sys.executable, "-m", "specargo.pipeline_cli", "reconcile-journal",
                  "--run-id", "r1", "--partitions-file", str(parts),
                  "--final-stage", "load",
                  "--notify-webhook", "http://127.0.0.1:1/hook"],
@@ -364,18 +369,18 @@ def test_cli_bad_inputs_fail_cleanly():
         art = root / "a.txt"
         art.write_text("x", encoding="utf-8")
         p = subprocess.run(
-            [sys.executable, str(APP / "pipeline_cli.py"), "gate", "--stage", "s",
+            [sys.executable, "-m", "specargo.pipeline_cli", "gate", "--stage", "s",
              "--artifact", str(art), "--checks", "[]"],
             capture_output=True, text=True)
         assert p.returncode != 0 and "Traceback" not in p.stderr, p.stderr
         p = subprocess.run(
-            [sys.executable, str(APP / "pipeline_cli.py"), "gate", "--stage", "s",
+            [sys.executable, "-m", "specargo.pipeline_cli", "gate", "--stage", "s",
              "--artifact", str(art), "--checks", '["file_nonempty"]',
              "--check-config-file", str(root / "missing.json")],
             capture_output=True, text=True)
         assert p.returncode != 0 and "Traceback" not in p.stderr, p.stderr
         p = subprocess.run(
-            [sys.executable, str(APP / "pipeline_cli.py"), "reconcile-journal",
+            [sys.executable, "-m", "specargo.pipeline_cli", "reconcile-journal",
              "--run-id", "r", "--partitions-file", str(root / "missing.json"),
              "--final-stage", "load"],
             capture_output=True, text=True)
@@ -390,7 +395,7 @@ def test_on_exit_missing_partitions_on_success_path_fails():
             "k8s:", "k8s:\n  journal: true")))
         wf = compile_workflow(spec)
         on_exit = next(t for t in wf["spec"]["templates"] if t["name"] == "on-exit")
-        script = on_exit["container"]["args"][0].replace("/app/", str(APP) + "/")
+        script = on_exit["container"]["args"][0].replace("/app/", "")
         env = dict(os.environ)
         env.update({"OBJSTORE_KIND": "local",
                     "OBJSTORE_ROOT": str(root / "artifacts"),

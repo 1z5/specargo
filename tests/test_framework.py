@@ -1,20 +1,27 @@
 """框架层测试：声明式 spec、通用 runner、插件检查、对账。"""
 from __future__ import annotations
+import importlib.util
 
 import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-from spec import Partition, PipelineSpec, Stage, RetryPolicy, build_context, load_spec, parse_duration, render  # noqa: E402
-from checks import CheckResult, available, register, run_check  # noqa: E402
-from runner import Runner  # noqa: E402
-import state as st  # noqa: E402
+from specargo.spec import Partition, PipelineSpec, Stage, RetryPolicy, build_context, load_spec, parse_duration, render  # noqa: E402
+from specargo.checks import CheckResult, available, register, run_check  # noqa: E402
+from specargo.runner import Runner  # noqa: E402
+from specargo import state as st  # noqa: E402
 
 # 测试里多处需要仓根与应用目录
 ROOT = Path(__file__).resolve().parents[1]
-APP_DIR = ROOT / "app"
+# 优先用已安装的包（pip install -e .）；未安装时退回 src/（不依赖安装也能跑测试）
+_SRC = ROOT / "src"
+if str(_SRC) not in sys.path and not importlib.util.find_spec("specargo"):
+    sys.path.insert(0, str(_SRC))
+
+import specargo  # noqa: E402  (供 specargo.__file__ 定位包目录)
+import specargo.examples  # noqa: E402  (示例步骤子包)
+APP_DIR = Path(specargo.__file__).parent
 
 
 # ---------------- spec ----------------
@@ -34,7 +41,7 @@ def test_render_supports_dotted_paths():
 
 def test_render_strict_rejects_unknown_variable():
     """未定义变量必须报错，不能静默替换成空串（残缺命令最难查）。"""
-    from spec import SpecError
+    from specargo.spec import SpecError
     ctx = {"params": {"n": 3}}
     try:
         render("--run-id {{params.run_id}}", ctx)
@@ -48,7 +55,7 @@ def test_render_strict_rejects_unknown_variable():
 def test_load_spec_rejects_undeclared_param():
     """YAML 用了未声明参数必须在加载期炸掉。"""
     import tempfile
-    from spec import SpecError, load_spec
+    from specargo.spec import SpecError, load_spec
 
     bad = """
 name: bad
@@ -324,7 +331,7 @@ def _load_etl_spec():
 
 def test_compile_produces_valid_dag_shape():
     """编译产物：DAG 形状、模板集合、依赖关系正确。"""
-    from spec2argo import compile_workflow
+    from specargo.spec2argo import compile_workflow
 
     spec = _load_etl_spec()
     wf = compile_workflow(spec)
@@ -346,7 +353,7 @@ def test_compile_produces_valid_dag_shape():
 
 def test_compile_preserves_retry_policy():
     """retryStrategy 分层必须保留：extract 可重试，transform limit 0。"""
-    from spec2argo import compile_workflow
+    from specargo.spec2argo import compile_workflow
 
     spec = _load_etl_spec()
     wf = compile_workflow(spec)
@@ -360,18 +367,18 @@ def test_compile_preserves_retry_policy():
 
 def test_compile_wires_object_store_contract():
     """跨 Pod 数据必须接线成 get→执行→put，且 key 一致。"""
-    from spec2argo import compile_workflow
+    from specargo.spec2argo import compile_workflow
 
     spec = _load_etl_spec()
     wf = compile_workflow(spec)
     by_name = {t["name"]: t for t in wf["spec"]["templates"]}
 
     extract_script = by_name["extract"]["container"]["args"][0]
-    assert "objstore.py put" in extract_script and "raw.jsonl" in extract_script
+    assert "specargo.objstore put" in extract_script and "raw.jsonl" in extract_script
 
     transform_script = by_name["transform"]["container"]["args"][0]
-    assert "objstore.py get" in transform_script and "raw.jsonl" in transform_script
-    assert "objstore.py put" in transform_script and "clean.jsonl" in transform_script
+    assert "specargo.objstore get" in transform_script and "raw.jsonl" in transform_script
+    assert "specargo.objstore put" in transform_script and "clean.jsonl" in transform_script
 
     # 上下游 key 必须一致（否则下游取不到上游产物）
     assert 'runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/raw.jsonl' in extract_script
@@ -384,22 +391,22 @@ def test_compile_wires_object_store_contract():
 
 def test_compile_emits_gate_for_checks():
     """有 checks 的 stage 必须生成独立 gate 任务，且调用框架 CLI 跑真实检查。"""
-    from spec2argo import compile_workflow
+    from specargo.spec2argo import compile_workflow
 
     spec = _load_etl_spec()
     wf = compile_workflow(spec)
     by_name = {t["name"]: t for t in wf["spec"]["templates"]}
     gate = by_name["gate-extract"]["container"]["args"][0]
     # gate 不再是内联 Python 片段，而是调用本地也可单测的 CLI
-    assert "pipeline_cli.py gate" in gate
     assert "row_count" in gate and "file_nonempty" in gate
     assert "--check-config-file" in gate
-    assert "from checks import run_check" not in gate
+    assert "run_check" not in gate            # 不再内联检查实现
+    assert "-m specargo.pipeline_cli gate" in gate
 
 
 def test_compile_discover_outputs_json_array():
     """discover 必须输出 JSON 数组字符串，否则 withParam 展不开。"""
-    from spec2argo import compile_workflow
+    from specargo.spec2argo import compile_workflow
 
     spec = _load_etl_spec()
     wf = compile_workflow(spec)
@@ -412,7 +419,7 @@ def test_compile_discover_outputs_json_array():
 
 def test_compile_is_deterministic():
     """同一 spec 编译两次结果一致（可做 drift 检测）。"""
-    from spec2argo import compile_workflow
+    from specargo.spec2argo import compile_workflow
 
     spec = _load_etl_spec()
     a = compile_workflow(spec)
@@ -426,25 +433,26 @@ def test_compile_is_deterministic():
 # 导致渲染出 `python3 /etl_steps.py`，但当时没有任何测试真跑过真实 pipeline。
 
 def test_runner_overrides_empty_injected_params():
-    """Runner 必须覆盖 YAML 里声明的空占位（app_dir/run_id），不能用 setdefault。"""
-    from runner import Runner
+    """Runner 必须覆盖 YAML 里声明的空占位（run_id/state_db），不能用 setdefault。
+
+    包化后业务命令写成 ``-m specargo.examples.x``，不再有 app_dir 占位
+    （这是有意的契约变更：镜像只要 pip install，不需要 /app/*.py）。
+    """
+    from specargo.runner import Runner
 
     spec = _load_etl_spec()
     # 前置：YAML 确实声明了空串占位（这是 bug 的触发条件）
-    assert spec.params.get("app_dir") == "", spec.params
     assert spec.params.get("run_id") == "", spec.params
 
     Runner(spec, verbose=False)
 
-    assert spec.params["app_dir"], "app_dir 未被注入（渲染会得到 /etl_steps.py）"
-    assert Path(spec.params["app_dir"]).is_dir(), spec.params["app_dir"]
     assert spec.params["run_id"], "run_id 未被注入（状态表追溯会失效）"
 
 
 def test_real_pipeline_commands_render_without_empty_paths():
     """真实 pipeline 的每条命令渲染后，不能出现空路径/未解析变量。"""
-    from runner import Runner
-    from spec import build_context, render
+    from specargo.runner import Runner
+    from specargo.spec import build_context, render
 
     spec = _load_etl_spec()
     Runner(spec, verbose=False)
@@ -466,8 +474,8 @@ def test_real_pipeline_runs_end_to_end_green():
 
     这是最重要的一条——它把"旗舰 demo 能跑"变成 CI 断言。
     """
-    from runner import Runner
-    from state import connect, reconcile_generic
+    from specargo.runner import Runner
+    from specargo.state import connect, reconcile_generic
 
     with tempfile.TemporaryDirectory() as d:
         work = Path(d)
@@ -489,7 +497,7 @@ def test_real_pipeline_runs_end_to_end_green():
 
 def test_compile_workflow_uses_spec_name():
     """编译产物的 workflow 名必须是 spec.name（曾因循环变量遮蔽变成 consumed artifact 名）。"""
-    from spec2argo import compile_workflow
+    from specargo.spec2argo import compile_workflow
 
     spec = _load_etl_spec()
     wf = compile_workflow(spec)
@@ -504,7 +512,7 @@ def test_compile_workflow_uses_spec_name():
 
 def test_shard_assignment_is_deterministic():
     """分片必须确定性：同一个 key 永远同一片，且与遍历顺序无关（训练可复现的前提）。"""
-    from manifest import shard_of
+    from specargo.examples.manifest import shard_of
 
     keys = ["p1-%04d" % i for i in range(200)]
     first = {k: shard_of(k, 4) for k in keys}
@@ -520,7 +528,7 @@ def test_manifest_verify_detects_corruption_and_missing_shard():
     """manifest 校验必须能抓出：分片被改、分片缺失、条数对不上。"""
     import json
     import tempfile
-    from manifest import Manifest, ShardInfo, file_sha256
+    from specargo.examples.manifest import Manifest, ShardInfo, file_sha256
 
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
@@ -567,7 +575,7 @@ def test_clean_dedups_and_quarantines():
                        encoding="utf-8")
         out, quar = base / "clean.jsonl", base / "quarantine.jsonl"
         rc = subprocess.run(
-            [_sys.executable, str(APP_DIR / "dataset_steps.py"), "clean",
+            [_sys.executable, "-m", "specargo.examples.dataset_steps", "clean",
              "--in", str(raw), "--out", str(out), "--quarantine", str(quar)],
             capture_output=True, text=True,
         )
@@ -581,7 +589,7 @@ def test_clean_dedups_and_quarantines():
 
 def test_dataset_build_pipeline_end_to_end():
     """真实跑 dataset-build 管线：清洗→分片→manifest 自校验，全绿。"""
-    from runner import Runner
+    from specargo.runner import Runner
 
     spec = load_spec(str(ROOT / "pipelines" / "dataset-build.yaml"))
     with tempfile.TemporaryDirectory() as d:
@@ -594,7 +602,7 @@ def test_dataset_build_pipeline_end_to_end():
         assert manifests, "没有产出 manifest"
         for mf in manifests:
             rc = subprocess.run(
-                [_sys.executable, str(APP_DIR / "manifest.py"), "verify",
+                [_sys.executable, "-m", "specargo.examples.manifest", "verify",
                  "--manifest", str(mf), "--base-dir", str(Path(d) / "out")],
                 capture_output=True, text=True,
             )

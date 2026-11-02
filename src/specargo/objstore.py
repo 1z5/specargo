@@ -37,7 +37,7 @@ def _store():
 
     这样本 CLI 与单机代码走同一份存储抽象，只有端点配置不同。
     """
-    from artifacts import LocalArtifactStore, S3ArtifactStore
+    from .artifacts import LocalArtifactStore, S3ArtifactStore
 
     kind = os.getenv("OBJSTORE_KIND", "s3")
     if kind == "local":

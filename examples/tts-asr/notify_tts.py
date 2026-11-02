@@ -17,8 +17,8 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from envcompat import LEGACY_STATE_DB, getenv
-from state import VERIFIED, connect
+from specargo.envcompat import LEGACY_STATE_DB, getenv
+from specargo.state import VERIFIED, connect
 
 
 def build_summary(conn, run_id: str) -> dict:

@@ -32,7 +32,7 @@ from pathlib import Path
 
 def _load_plugins(cli_plugins: list[str] | None, cli_paths: list[str] | None) -> None:
     """按 CLI 参数 + env 加载领域插件（与本地 runner 的 spec.plugins 同源）。"""
-    from plugins import load
+    from .plugins import load
 
     modules = list(cli_plugins or [])
     env_modules = os.getenv("PIPELINE_PLUGINS", "").strip()
@@ -62,7 +62,7 @@ def _read_config(args) -> dict:
 
 def cmd_gate(args) -> int:
     """跑一个 stage 的质量闸门；任一检查失败 → 非零退出（集群 task 失败）。"""
-    from checks import run_check
+    from .checks import run_check
 
     _load_plugins(args.plugin, args.plugin_path)
     checks = json.loads(args.checks) if args.checks else []
@@ -92,7 +92,7 @@ def cmd_gate(args) -> int:
 
 
 def _record_journal(args, status: str) -> None:
-    from journal import put_status
+    from .journal import put_status
 
     put_status(run_id=args.run_id, dataset=args.dataset, partition=args.partition,
                variant=args.variant or "", stage=args.stage, status=status,
@@ -100,7 +100,7 @@ def _record_journal(args, status: str) -> None:
 
 
 def cmd_state_put(args) -> int:
-    from state import connect, upsert_item
+    from .state import connect, upsert_item
 
     conn = connect(args.state_db)
     try:
@@ -122,8 +122,8 @@ def cmd_state_put_remote(args) -> int:
 
 
 def cmd_reconcile_journal(args) -> int:
-    from notify import render_summary, send_webhook
-    from state import reconcile_datasets
+    from .notify import render_summary, send_webhook
+    from .state import reconcile_datasets
 
     try:
         partitions = json.loads(Path(args.partitions_file).read_text(encoding="utf-8"))
@@ -144,7 +144,7 @@ def cmd_reconcile_journal(args) -> int:
         if ds not in datasets:
             datasets.append(ds)
 
-    from journal import load_statuses
+    from .journal import load_statuses
     rows = load_statuses(args.run_id)
     terminal = json.loads(args.terminal_statuses) if args.terminal_statuses else ["verified"]
     recons = reconcile_datasets(datasets, expected, rows,

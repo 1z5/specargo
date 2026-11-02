@@ -8,6 +8,7 @@ podGC、插件路径）必须可配置且默认值明确。本套件锁住三件
 3. **契约固定**：run_id env 名与对象存储 key 根是框架语义，编译产物必须引用常量。
 """
 from __future__ import annotations
+import importlib.util
 
 import subprocess
 import sys
@@ -17,13 +18,17 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "app"
-sys.path.insert(0, str(APP))
+# 优先用已安装的包（pip install -e .）；未安装时退回 src/（不依赖安装也能跑测试）
+_SRC = ROOT / "src"
+if str(_SRC) not in sys.path and not importlib.util.find_spec("specargo"):
+    sys.path.insert(0, str(_SRC))
 
-from runtime import (OBJSTORE_KEY_ROOT, RESERVED_ENV, RUN_ID_ENV,  # noqa: E402
+import specargo  # noqa: E402  (供 specargo.__file__ 定位包目录)
+
+from specargo.runtime import (OBJSTORE_KEY_ROOT, RESERVED_ENV, RUN_ID_ENV,  # noqa: E402
                      RuntimeConfig)
-from spec import SpecError, load_spec                        # noqa: E402
-from spec2argo import compile_workflow                        # noqa: E402
+from specargo.spec import SpecError, load_spec                        # noqa: E402
+from specargo.spec2argo import compile_workflow                        # noqa: E402
 
 
 def _write_spec(text: str) -> Path:
@@ -103,7 +108,7 @@ def test_cli_runtime_file_overrides_spec():
         rt.write_text("image: cli/image:v2\n", encoding="utf-8")
         out = Path(d) / "wf.yaml"
         p = subprocess.run(
-            [sys.executable, str(APP / "spec2argo.py"), str(spec_file),
+            [sys.executable, "-m", "specargo.spec2argo", str(spec_file),
              "--runtime", str(rt), "-o", str(out)],
             capture_output=True, text=True)
         assert p.returncode == 0, p.stdout + p.stderr
@@ -166,7 +171,7 @@ def test_non_mapping_runtime_and_volumes_are_rejected():
     回归：load_spec 的 dict(raw.get("runtime")) 曾对字符串直接抛 ValueError；
     volumes 只校验了"是 dict"，字符串值/覆盖 name 会在编译期炸原生异常。
     """
-    from spec import load_spec
+    from specargo.spec import load_spec
     base = ("name: x\npartitions: {from: list, items: [{dataset: ds, key: k1}]}\n"
             "stages:\n  - {name: s, command: echo, outputs: [o], "
             "artifacts: {o: out/o.txt}}\n")

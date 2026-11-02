@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 from config import Config
-from resume import should_skip, write_fingerprint
+from specargo.resume import should_skip, write_fingerprint
 
 
 class TTSClient:

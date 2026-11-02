@@ -9,10 +9,10 @@
 管线用一份 YAML 描述（stage / 依赖 / 分区 / 重试 / 超时 / 质量闸门 / 产物契约），
 框架提供两个执行目标：
 
-- **本地**：`app/runner.py` 直接执行——断点续跑、依赖阻断、重试分层、质量闸门、对账收口；
-- **集群**：`app/spec2argo.py` 把同一份 spec 编译成 Argo Workflow CRD，本地与集群共享一份定义。
+- **本地**：`specargo-run`（`specargo.runner`）直接执行——断点续跑、依赖阻断、重试分层、质量闸门、对账收口；
+- **集群**：`specargo-compile`（`specargo.spec2argo`）把同一份 spec 编译成 Argo Workflow CRD，本地与集群共享一份定义。
 
-**框架层不含任何领域逻辑**：`app/` 不 import 领域代码，领域能力通过 `plugins:` 显式加载
+**框架层不含任何领域逻辑**：`src/specargo/` 不 import 领域代码，领域能力通过 `plugins:` 显式加载
 （旧前缀字符串只出现在两个兼容文件 `envcompat.py` / `legacy_state_migration.py`，
 CI 的纯净度守卫对它们例外）。仓库自带一个来自真实生产的领域示例
 [`examples/tts-asr/`](examples/tts-asr/README.md)（TTS 生成 + ASR 回检 + 对账），
@@ -47,7 +47,7 @@ YAML spec ─► spec.py 解析/校验 ─► runner.py 本地执行 ─► chec
 
 ### 数据集交付：manifest + 确定性分片
 
-`app/manifest.py` 解决训练/推理侧的硬约束：**同一份输入必须能切出同一份分片**——
+`specargo.examples.manifest` 解决训练/推理侧的硬约束：**同一份输入必须能切出同一份分片**——
 断点续训、数据并行、可复现评测都依赖这一点，随机分片重跑就切不回同一份。
 
 - 分片规则：`shard = sha256(id) % N`（不用内置 `hash()`，它受 `PYTHONHASHSEED` 影响）
@@ -84,7 +84,7 @@ YAML spec ─► spec.py 解析/校验 ─► runner.py 本地执行 ─► chec
 | **插件机制** | `plugins.py`：spec 顶层 `plugins: [模块名]`，按 spec 目录 / 父目录定位模块后 `importlib` 加载；加载失败启动期报 `SpecError`；框架**不 import** 领域代码 |
 | **可观测性** | `metrics.py` Prometheus text 格式指标（执行数 / 耗时分布 / 积压 / 对账缺失 / inflight；`stage_progress` 已定义但当前未接线） |
 | **存储抽象** | `artifacts.py` 对象存储契约 + 本地目录 / S3 兼容双实现，key 目录穿越防护；`objstore.py` 是集群内 put/get CLI；跨 Pod 走路径契约 `runs/<run_id>/<partition>/<stage>.<ext>` |
-| **容器与编排** | 根目录 `Dockerfile`（moto S3 + `app/`）+ `k8s/object-store.yaml` / `artifact-repository.yaml`；CI 在 kind + Argo Workflows v3.7.18 上实测跑通（见「已验证」）。`k8s/workflow-etl-smoke.yaml` 是历史手写对照 |
+| **容器与编排** | 根目录 `Dockerfile`（pip install specargo + moto S3）+ `k8s/object-store.yaml` / `artifact-repository.yaml`；CI 在 kind + Argo Workflows v3.7.18 上实测跑通（见「已验证」）。`k8s/workflow-etl-smoke.yaml` 是历史手写对照 |
 | **运行时配置** | `RuntimeConfig`（`runtime.py`）：镜像 / 命名空间 / SA / 挂载 / 对象存储 / deadline / podGC 集中一处；优先级：内置默认 < spec `runtime:` 节（旧名 `k8s:` 仍兼容）< CLI `--runtime runtime.yaml`（按 key 覆盖，一份 spec 多环境） |
 | **编译器回归** | golden 编译产物（`tests/golden/` + `tests/test_golden.py`）：编译器行为变更必须显式 `python3 tests/update_golden.py` 更新 golden，否则以 drift 失败——防"顺手改坏编译器" |
 | **成本与效率** | 并发与重试参数化、输入指纹避免重复计算、`--force` 受控重处理、stage 级 requests/limits 编译进 container；`nodeSelector`/`tolerations` 编译器尚未映射 |
@@ -94,23 +94,23 @@ YAML spec ─► spec.py 解析/校验 ─► runner.py 本地执行 ─► chec
 依赖：Python 3.11+。框架层只需要 PyYAML（示例的重依赖在各自 `examples/*/requirements.txt`）。
 
 ```bash
-python3 -m pip install -r app/requirements.txt
+python3 -m pip install -r requirements.txt
 
 # 1) 数据集构建链路：seed → clean → shard → manifest（零外部依赖）
-python3 app/dataset_steps.py seed  --partition 1 --out out/raw/1.jsonl
-python3 app/dataset_steps.py clean --in out/raw/1.jsonl --out out/clean/1.jsonl --quarantine out/quarantine/1.jsonl
-python3 app/dataset_steps.py shard --in out/clean/1.jsonl --out-dir out/shards/1 \
+python3 -m specargo.examples.dataset_steps seed  --partition 1 --out out/raw/1.jsonl
+python3 -m specargo.examples.dataset_steps clean --in out/raw/1.jsonl --out out/clean/1.jsonl --quarantine out/quarantine/1.jsonl
+python3 -m specargo.examples.dataset_steps shard --in out/clean/1.jsonl --out-dir out/shards/1 \
         --shards 2 --manifest out/manifest/1.json --dataset raw_partition --version v1 --base-dir out
-python3 app/manifest.py verify --manifest out/manifest/1.json --base-dir out
+python3 -m specargo.examples.manifest verify --manifest out/manifest/1.json --base-dir out
 
 # 2) 本地跑一条完整管线（不需要集群；--workdir 会自动创建）
-python3 app/runner.py pipelines/etl-demo.yaml --state-db /tmp/etl-run/state.db --workdir /tmp/etl-run
+specargo-run pipelines/etl-demo.yaml --state-db /tmp/etl-run/state.db --workdir /tmp/etl-run
 # 第二次：已到成功终态的 stage×partition 全部 resume 跳过
-python3 app/runner.py pipelines/etl-demo.yaml --state-db /tmp/etl-run/state.db --workdir /tmp/etl-run
+specargo-run pipelines/etl-demo.yaml --state-db /tmp/etl-run/state.db --workdir /tmp/etl-run
 
 # 3) 编译成 Argo CRD（lint 需要自行安装 argo CLI，可选）
 mkdir -p /tmp/compiled
-python3 app/spec2argo.py pipelines/etl-demo.yaml -o /tmp/compiled/etl-demo.yaml
+specargo-compile pipelines/etl-demo.yaml -o /tmp/compiled/etl-demo.yaml
 argo lint --offline /tmp/compiled/etl-demo.yaml
 
 # 3b) 同一份 spec 换执行环境：运行时配置按 key 覆盖（不动 spec）
@@ -119,7 +119,7 @@ image: your-registry/specargo:v1
 namespace: data-platform
 service_account: argo-workflow
 YAML
-python3 app/spec2argo.py pipelines/etl-demo.yaml --runtime /tmp/compiled/runtime.yaml \
+specargo-compile pipelines/etl-demo.yaml --runtime /tmp/compiled/runtime.yaml \
   -o /tmp/compiled/etl-demo-prod.yaml
 
 # 4) 离线测试：115 例（框架 111 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
@@ -137,7 +137,7 @@ gh workflow run k8s-smoke -R 1z5/specargo
 ## 契约命名与插件
 
 框架契约统一用中性命名；历史 `TTS_*` 环境变量保留**一个版本**的兼容读取
-（`app/envcompat.py`：新名优先、旧名回退）。
+（`specargo/envcompat.py`：新名优先、旧名回退）。
 
 | 契约 | 框架命名 | 兼容 / 迁移 |
 |---|---|---|
@@ -145,7 +145,7 @@ gh workflow run k8s-smoke -R 1z5/specargo
 | 镜像与集群 | 镜像 tag `specargo:ci`；kind 集群名 `specargo` | — |
 | 状态库 | 表 `pipeline_run` / `pipeline_item`；列 `dataset` / `partition` / `variant` | 旧库 `tts_run` / `tts_item` 在 `connect()` 时原地迁移（`legacy_state_migration.py`，`ALTER TABLE RENAME`，幂等） |
 | 对象存储 key | `runs/<run_id>/<partition>/<stage>.<ext>` | run_id 取 `PIPELINE_RUN_ID`（编译器注入 `{{workflow.name}}`） |
-| 领域插件 | spec 顶层 `plugins: [模块名]` | `app/plugins.py` 把 spec 目录及其父目录加入 `sys.path` 后 `importlib` 加载；失败启动期 `SpecError` |
+| 领域插件 | spec 顶层 `plugins: [模块名]` | `specargo/plugins.py` 把 spec 目录及其父目录加入 `sys.path` 后 `importlib` 加载；失败启动期 `SpecError` |
 
 插件是**单向依赖**：`examples → framework`，框架层永远不反向 import 领域代码。
 本地 runner 与编译出的集群 gate **加载同一份声明**：编译器把 `plugins` 注入 gate 容器
@@ -277,7 +277,7 @@ artifacts 的对象存储路径契约（上游 put、下游 get，key 一致）�
 
 ```bash
 # 本地编译 + lint（无需集群，argo CLI 需自行安装）
-python3 app/spec2argo.py pipelines/etl-demo.yaml -o /tmp/compiled/etl-demo.yaml
+specargo-compile pipelines/etl-demo.yaml -o /tmp/compiled/etl-demo.yaml
 argo lint --offline /tmp/compiled/etl-demo.yaml
 
 # 手动触发 CI 集群冒烟
@@ -354,14 +354,19 @@ gh workflow run k8s-smoke -R 1z5/specargo
 ## 目录
 
 ```
-app/                     框架层（无领域知识）
+pyproject.toml            pip install specargo（console scripts + extras: s3/dev）
+src/specargo/            框架包（无领域知识；python3 -m specargo.<module> 或 specargo-* 命令）
   spec.py                 声明式管线定义（YAML → PipelineSpec）+ 严格校验 + 渲染
   runner.py               本地执行器（依赖拓扑 / 断点续跑 / 重试 / 超时 / 质量闸门 / 对账）
   spec2argo.py            编译器：PipelineSpec → Argo Workflow CRD（CI 提交编译产物）
+  runtime.py              RuntimeConfig：执行目标配置（镜像/命名空间/挂载/对象存储/deadline/podGC）
   plugins.py              显式插件加载（spec.plugins → importlib）
-  envcompat.py            PIPELINE_* 新名 + TTS_* 旧名兼容读取（一个版本）
-  legacy_state_migration.py  旧状态库（tts_* 表）→ pipeline_* 的原地迁移（兼容层，下一版本删除）
-  state.py                pipeline_run / pipeline_item 状态表 + 对账
+  subprocess_env.py       子进程环境注入（让任务/检查能 import specargo，无需手动 PYTHONPATH）
+  cli.py                  specargo 统一 CLI（run / compile / gate / state / reconcile / service）
+  journal.py              集群侧状态日志（对象存储 key，跨 Pod 并发安全）
+  pipeline_cli.py         集群侧 CLI：gate / state put(-remote) / reconcile-journal
+  notify.py               通用对账文本渲染 + webhook 告警
+  state.py                pipeline_run / pipeline_item 状态表 + 对账（SQLite，本地）
   checks.py               质量检查插件注册表 + 4 个通用检查
   resume.py               输入指纹与跳过判定
   artifacts.py            对象存储契约（本地目录 / S3 兼容双实现）
@@ -369,10 +374,13 @@ app/                     框架层（无领域知识）
   argo_io.py              Argo outputs / parameters 写入
   metrics.py              Prometheus 指标（Counter/Gauge/Histogram + textfile）
   service.py              标准库 HTTP 常驻服务（探针 / 同步异步 / 优雅停机）
-  etl_steps.py            ETL 示例三步
-  dataset_steps.py        数据集示例三步（seed / clean / shard）
-  manifest.py             确定性分片 + manifest 校验
-  requirements.txt        框架层依赖（仅 PyYAML）
+  envcompat.py            PIPELINE_* 新名 + TTS_* 旧名兼容读取（一个版本后删除）
+  legacy_state_migration.py  旧状态库（tts_* 表）→ pipeline_* 的原地迁移（兼容层，下一版本删除）
+  examples/               内置示例步骤（真实使用时替换为你自己的模块）
+    etl_steps.py            ETL 示例三步
+    dataset_steps.py        数据集示例三步（seed / clean / shard）
+    manifest.py             确定性分片 + manifest 校验
+requirements.txt          框架层依赖（仅 PyYAML）
 examples/tts-asr/         领域插件示例（TTS 生成 + ASR 回检 + 对账）
   README.md               示例定位、依赖、运行方式、与框架的边界
   docs/VERIFICATION.md    句子级漏读三态判定的方法与阈值标定
@@ -383,7 +391,7 @@ pipelines/                通用管线定义（dataset-build.yaml / etl-demo.yam
 k8s/                      CI 基础设施（object-store / artifact-repository / 历史 smoke）
 docs/                     架构（ARCHITECTURE.md）与计划（ROADMAP.md）
 tests/                    离线测试（框架 111 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
-Dockerfile                通用 CI 镜像（moto S3 + app/）
+Dockerfile                通用 CI 镜像（pip install specargo + moto S3）
 ```
 
 镜像构建：`docker build -f Dockerfile -t specargo:ci .`（构建上下文为仓库根；CI 与

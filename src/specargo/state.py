@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
-from legacy_state_migration import migrate_legacy_schema
+from .legacy_state_migration import migrate_legacy_schema
 
 # item 状态
 PENDING = "pending"

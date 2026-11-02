@@ -24,7 +24,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from objstore import _store
+from .objstore import _store
 
 STATUS_ROOT = "_status"
 RUN_DIR = "_run"

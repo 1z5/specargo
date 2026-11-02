@@ -12,7 +12,7 @@ import _bootstrap  # noqa: F401  (把仓库 app/ 加入 sys.path)
 
 from pathlib import Path
 
-from checks import CheckResult, register
+from specargo.checks import CheckResult, register
 
 
 @register("asr_three_state")

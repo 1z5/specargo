@@ -17,11 +17,11 @@ import os
 import sys
 from pathlib import Path
 
-from argo_io import publish_artifact, write_params
+from specargo.argo_io import publish_artifact, write_params
 from book_reader import read_book
 from domain_state import reconcile, scan_duplicate_files
-from envcompat import LEGACY_RUN_ID, getenv
-from state import close_run, connect
+from specargo.envcompat import LEGACY_RUN_ID, getenv
+from specargo.state import close_run, connect
 
 
 def summarize_book(conn, book_path: Path, voice: str) -> dict:
