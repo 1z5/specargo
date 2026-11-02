@@ -42,7 +42,7 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 | 10 | 自动生成的 objstore `--file` 未加引号（路径含空格失败）；gate 未声明 dataset/variant 输入 | 路径统一 `shlex.quote`；gate inputs/args 补齐三个维度 |
 | 11 | 文档与实际不符（死命令 / 数字 / 夸大） | README / ARCHITECTURE / ROADMAP 按实测证据校正 |
 
-新增回归：`tests/test_p0_regressions.py`；离线套件合计 **115 例**（框架 111 + 领域示例 4），全部通过。
+新增回归：`tests/test_p0_regressions.py`；离线套件合计 **124 例**（框架 120 + 领域示例 4），全部通过。
 验证方式：本地四套件 + ETL / dataset 管线 E2E + 编译产物零残留 + 独立 Argo 模拟器
 （每个 task-item 独立目录、只共享对象存储）跑通 etl-demo 与 dataset-build 的编译产物；
 真实集群侧由 CI 的 kind smoke 继续验证。
@@ -104,10 +104,16 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 - `subprocess_env.child_env()` 让本地跑 demo 也不需要手动设 `PYTHONPATH`。
 - 测试与 examples 通过 bootstrap 兜底：已安装用包，未安装退回 `src/`。
 
-### 3. `StateStore` 协议
+### 3. `StateStore` 协议 + 集群 resume（已完成）
 
-`state.py` 拆成 `StateStore` Protocol + `SqliteStateStore` 实现 + 泛型对账；
-集群写路径先明确"不写"或"单写者"，再谈并发。Postgres / Redis 等后端在有真实多写者需求前不做。
+- `state.py` 拆出 `StateStore` 协议 + `SqliteStateStore` / `JournalStateStore` 两个实现
+  （item 读写语义一致：四元组主键 + 同状态值；run 级记录在 journal 实现里退化为内存记录）。
+- `resume_policy.py`：终态判定唯一实现，本地 runner 与集群编译产物共用
+  （有闸门只认 verified，无闸门 generated 即终态）。
+- 集群 resume：`k8s.resume: true` 时每个 stage 前插 `state check-skip`
+  （退出码 0=已终态跳过 / 1=需执行 / 2=用法错误）；读状态失败按未完成处理。
+- 跳过发生在 task 内部（Argo 仍拉 Pod）；要省 Pod 需 WorkflowTemplate + `when`（后续）。
+- Postgres / Redis 等后端在有真实多写者需求前不做。
 
 ## 进行中 / 遗留
 
@@ -145,4 +151,4 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 - 多副本高可用（object-store / workflow-controller 都是单副本）
 - 生产级对象存储（MinIO / OSS / S3）的真实吞吐与成本
 - gRPC 服务形态（当前只有 HTTP）
-- 集群侧断点续跑（状态日志只用于 onExit 对账）
+

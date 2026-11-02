@@ -32,5 +32,14 @@
       "pod_gc_strategy": ""
     },
     "name": null
+  },
+  {
+    "spec": "pipelines/etl-demo.yaml",
+    "golden": "etl-demo-resume.yaml",
+    "overrides": {
+      "resume": true,
+      "journal": true
+    },
+    "name": "etl-demo-resume"
   }
 ]

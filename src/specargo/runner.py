@@ -264,13 +264,9 @@ class Runner:
     # ------------------------------------------------------------------
     @staticmethod
     def _stage_terminal_statuses(stage) -> tuple[str, ...]:
-        """stage 的成功终态：配了质量闸门只认 verified，否则 generated 即终态。
-
-        这个定义同时用于 resume 跳过与最终对账。若统一只认 verified，
-        "没配 checks 的 stage"将永远无法 resume、且管线永远对账失败——
-        等于框架隐性强制每条管线每个 stage 都必须配质量闸门。
-        """
-        return (VERIFIED,) if stage.checks else (GENERATED, VERIFIED)
+        """stage 的成功终态（委托 ``resume_policy``，本地/集群共用一份定义）。"""
+        from .resume_policy import stage_terminal_statuses
+        return stage_terminal_statuses(bool(stage.checks))
 
     def _already_completed(self, stage, partition: Partition) -> bool:
         if self.state is None:

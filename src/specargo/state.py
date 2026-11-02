@@ -254,3 +254,121 @@ def reconcile_datasets(datasets, expected, rows, final_stage: str | None = None,
                        terminal_statuses=terminal_statuses)
         for ds in datasets
     ]
+
+
+# ---------------------------------------------------------------------------
+# StateStore 协议：本地 SQLite 与集群 journal 共用同一组操作
+# ---------------------------------------------------------------------------
+
+class StateStore:
+    """状态存储协议（结构化子类型，不需要显式继承）。
+
+    两个实现的边界：
+
+    - ``SqliteStateStore``：本地单进程，run/item 都在一个 SQLite 库里；
+    - ``JournalStateStore``：集群多 Pod，item 状态按 key 写在对象存储，
+      run 级记录（open/close）在本地没有对应物，退化为 no-op + 内存记录。
+
+    共同点是 **item 级读写语义一致**（四元组主键 + 状态值），因此
+    resume 判定、对账判定可以只写一份。
+    """
+
+    def open_run(self, run_id: str, note: str = "") -> None:
+        raise NotImplementedError
+
+    def close_run(self, run_id: str, status: str, note: str = "") -> None:
+        raise NotImplementedError
+
+    def upsert_item(self, *, dataset: str, partition: str, variant: str,
+                    stage: str, status: str, run_id: str = "",
+                    attempt: int | None = None, coverage: float | None = None,
+                    accuracy: float | None = None) -> None:
+        raise NotImplementedError
+
+    def get_item(self, dataset: str, partition: str, variant: str,
+                 stage: str) -> dict | None:
+        raise NotImplementedError
+
+    def items_for(self, dataset: str) -> list[dict]:
+        raise NotImplementedError
+
+    def all_items(self) -> list[dict]:
+        raise NotImplementedError
+
+
+class SqliteStateStore(StateStore):
+    """SQLite 实现：包装既有模块级函数（行为与直接用 conn 完全一致）。"""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+    def open_run(self, run_id: str, note: str = "") -> None:
+        open_run(self.conn, run_id, note)
+
+    def close_run(self, run_id: str, status: str, note: str = "") -> None:
+        close_run(self.conn, run_id, status, note)
+
+    def upsert_item(self, *, dataset: str, partition: str, variant: str,
+                    stage: str, status: str, run_id: str = "",
+                    attempt: int | None = None, coverage: float | None = None,
+                    accuracy: float | None = None) -> None:
+        upsert_item(self.conn, dataset=dataset, partition=partition,
+                    variant=variant, stage=stage, status=status, attempt=attempt,
+                    coverage=coverage, accuracy=accuracy, run_id=run_id)
+
+    def get_item(self, dataset: str, partition: str, variant: str,
+                 stage: str) -> dict | None:
+        return get_item(self.conn, dataset, partition, variant, stage)
+
+    def items_for(self, dataset: str) -> list[dict]:
+        return items_for(self.conn, dataset)
+
+    def all_items(self) -> list[dict]:
+        return self.conn.execute("SELECT * FROM pipeline_item").fetchall()
+
+
+class JournalStateStore(StateStore):
+    """集群侧实现：item 状态读写对象存储 journal（多 Pod 并发安全）。
+
+    与 SQLite 实现的差异（有意为之，不是遗漏）：
+        - ``open_run`` / ``close_run``：本地没有"run 头记录"可写，退化为内存记录
+          （对账与 resume 都不依赖它，只用于日志/调试）。
+        - ``all_items``：列举整个 run 的状态前缀（O(N)），只有对账用；
+          resume 走 ``get_item``（O(1) 单点读）。
+    """
+
+    def __init__(self, run_id: str):
+        from .journal import get_item_status, load_statuses, put_status
+
+        self.run_id = run_id
+        self._runs: dict[str, dict] = {}
+        self._get_item_status = get_item_status
+        self._load_statuses = load_statuses
+        self._put_status = put_status
+
+    def open_run(self, run_id: str, note: str = "") -> None:
+        self._runs[run_id] = {"run_id": run_id, "note": note, "closed": False}
+
+    def close_run(self, run_id: str, status: str, note: str = "") -> None:
+        entry = self._runs.setdefault(run_id, {"run_id": run_id})
+        entry.update({"status": status, "note": note, "closed": True})
+
+    def upsert_item(self, *, dataset: str, partition: str, variant: str,
+                    stage: str, status: str, run_id: str = "",
+                    attempt: int | None = None, coverage: float | None = None,
+                    accuracy: float | None = None) -> None:
+        self._put_status(run_id=run_id or self.run_id, dataset=dataset,
+                         partition=partition, variant=variant, stage=stage,
+                         status=status, attempt=attempt)
+
+    def get_item(self, dataset: str, partition: str, variant: str,
+                 stage: str) -> dict | None:
+        return self._get_item_status(self.run_id, dataset=dataset,
+                                     partition=partition, variant=variant,
+                                     stage=stage)
+
+    def items_for(self, dataset: str) -> list[dict]:
+        return [r for r in self.all_items() if r.get("dataset") == dataset]
+
+    def all_items(self) -> list[dict]:
+        return self._load_statuses(self.run_id)

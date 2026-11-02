@@ -46,6 +46,7 @@ from pathlib import Path
 
 import yaml
 
+from .resume_policy import stage_terminal_statuses
 from .runtime import OBJSTORE_KEY_ROOT, RUN_ID_ENV, RuntimeConfig
 from .spec import PipelineSpec, SpecError, Stage, load_spec
 
@@ -266,6 +267,25 @@ def _plugin_env(spec: PipelineSpec, runtime: RuntimeConfig) -> list[dict]:
     return env
 
 
+def _resume_skip_snippet(stage: Stage) -> str:
+    """集群 resume：stage 启动前查状态日志，已到成功终态则整体跳过。
+
+    为什么在 stage 命令里而不是 DAG ``when``：Argo 的 ``when`` 只能引用参数，
+    拿不到"上一轮这个分区跑到哪"——状态在对象存储里，只能由 task 自己查。
+    退出码语义（见 pipeline_cli.state check-skip）：0=已终态应跳过，1=需执行。
+    """
+    return (
+        'python3 -m specargo.pipeline_cli state check-skip '
+        '--run-id "$%s" --dataset "{{inputs.parameters.dataset}}" '
+        '--partition "{{inputs.parameters.partition}}" '
+        '--variant "{{inputs.parameters.variant}}" --stage %s%s '
+        '&& { echo "[resume] %s 已完成，跳过"; exit 0; }'
+        % (RUN_ID_ENV, shlex.quote(stage.name),
+           " --has-checks" if stage.checks else "",
+           stage.name)
+    )
+
+
 def _state_put_snippet(stage_name: str, status: str) -> str:
     """stage/gate 结束后把 item 终态写入对象存储状态日志（集群跨 Pod）。"""
     return (
@@ -418,6 +438,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
     service_account = runtime.service_account
     active_deadline = runtime.active_deadline_seconds
     journal = runtime.journal
+    resume = runtime.resume
     # 默认成功后清理 Pod（默认行为不变）；CI 需要保留 Pod 做跨节点断言时可置空
     pod_gc_strategy = runtime.pod_gc_strategy
 
@@ -481,6 +502,8 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
                 consumed.append((art_name, artifact_paths[art_name]))
 
         parts = ["set -e"]          # get/put 失败必须中断，不能继续"成功"
+        if resume:
+            parts.append(_resume_skip_snippet(stage))
         get_snip = _objstore_get_snippet(dict(consumed))
         if get_snip:
             parts.append(get_snip)

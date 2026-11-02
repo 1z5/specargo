@@ -99,6 +99,20 @@ def put_status(*, run_id: str, dataset: str, partition: str, variant: str,
     return payload
 
 
+def get_item_status(run_id: str, *, dataset: str, partition: str, variant: str,
+                    stage: str) -> dict | None:
+    """读单个 (dataset, partition, variant, stage) 的最新状态；不存在返回 None。
+
+    集群 resume 用：stage 启动时只查自己这一个 key，不必列举整个 run 的
+    状态前缀（千级分区时列举是 O(N) 读，单点读是 O(1)）。
+    """
+    key = status_key(run_id, stage, dataset, partition, variant)
+    store = _store()
+    if not store.exists(key):
+        return None
+    return _read_temp(key)
+
+
 def load_statuses(run_id: str) -> list[dict]:
     """读取某次 run 的全部状态记录（onExit 对账用）。"""
     store = _store()

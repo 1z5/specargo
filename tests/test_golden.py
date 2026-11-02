@@ -77,10 +77,15 @@ def test_golden_covers_critical_shapes():
     assert "etl-demo.yaml" in names, "缺少普通管线 golden"
     assert "etl-demo-journal.yaml" in names, "缺少 journal golden（onExit 对账路径）"
     assert "etl-demo-podgc-off.yaml" in names, "缺少 podGC 关闭 golden（CI 变体）"
+    assert "etl-demo-resume.yaml" in names, "缺少集群 resume golden（check-skip 路径）"
     assert "tts-example.yaml" in names, "缺少领域插件 golden（plugins 注入）"
 
     journal = _load_golden({"golden": "etl-demo-journal.yaml"})
     assert journal["spec"]["onExit"] == "on-exit", "journal golden 缺少 onExit"
+    resume_wf = _load_golden({"golden": "etl-demo-resume.yaml"})
+    extract = next(t for t in resume_wf["spec"]["templates"] if t["name"] == "extract")
+    assert "state check-skip" in extract["container"]["args"][0], \
+        "resume golden 缺少 check-skip（集群 resume 会静默失效）"
     tts = _load_golden({"golden": "tts-example.yaml"})
     gate_env = next(
         t["container"]["env"] for t in tts["spec"]["templates"]

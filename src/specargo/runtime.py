@@ -32,7 +32,7 @@ RUNTIME_KEYS = {
     "image", "image_pull_policy", "service_account", "namespace",
     "objstore_endpoint", "objstore_env", "volumes", "mounts",
     "active_deadline_seconds", "pod_gc_strategy", "journal",
-    "notify_webhook", "plugin_path",
+    "notify_webhook", "plugin_path", "resume",
 }
 _STRING_KEYS = ("image", "image_pull_policy", "service_account", "namespace",
                 "objstore_endpoint", "pod_gc_strategy", "notify_webhook",
@@ -59,6 +59,8 @@ class RuntimeConfig:
     active_deadline_seconds: int = 1800
     pod_gc_strategy: str = "OnWorkflowSuccess"
     journal: bool = False
+    #: 集群 resume：stage 启动时查状态日志，已到终态则跳过（不重跑、不重复写产物）
+    resume: bool = False
     notify_webhook: str = ""
     plugin_path: str = ""
 
@@ -83,8 +85,10 @@ class RuntimeConfig:
         for key in _STRING_KEYS:
             if key in data and not isinstance(data[key], str):
                 raise SpecError(f"{where}.{key} 必须是字符串，实际 {data[key]!r}")
-        if "journal" in data and not isinstance(data["journal"], bool):
-            raise SpecError(f"{where}.journal 必须是布尔值，实际 {data['journal']!r}")
+        for bool_key in ("journal", "resume"):
+            if bool_key in data and not isinstance(data[bool_key], bool):
+                raise SpecError(
+                    f"{where}.{bool_key} 必须是布尔值，实际 {data[bool_key]!r}")
         if "active_deadline_seconds" in data and (
                 isinstance(data["active_deadline_seconds"], bool)
                 or not isinstance(data["active_deadline_seconds"], int)):

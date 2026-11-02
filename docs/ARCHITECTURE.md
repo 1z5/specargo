@@ -125,6 +125,8 @@
 
 | 模块 | 职责 |
 |---|---|
+| `resume_policy.py` | `stage_terminal_statuses()` / `is_terminal()`：终态判定的唯一实现（本地 runner 与集群 resume 共用，防双份漂移） |
+| `state.py` | `StateStore` 协议 + `SqliteStateStore`（本地）/ `JournalStateStore`（集群，对象存储 journal）；`evaluate_items` 对账 |
 | `runtime.py` | `RuntimeConfig`：执行目标运行时配置（镜像/命名空间/SA/挂载/对象存储/deadline/podGC/插件路径）；来源优先级 = 内置默认 < spec `runtime:` 节（旧名 `k8s:`）< CLI `--runtime`；固定契约 `PIPELINE_RUN_ID` / `runs` | 
 | `plugins.py` | `load(modules, search_dirs=...)`：把 spec 所在目录及其父目录加入 `sys.path`，再 `importlib` 逐个加载；失败抛 `SpecError`（启动期失败，而不是跑到一半发现检查未注册） |
 | `envcompat.py` | `getenv(name, legacy, default)`：新名 `PIPELINE_*` 优先、旧名 `TTS_*` 回退；旧前缀集中在此文件（一个版本后删除） |

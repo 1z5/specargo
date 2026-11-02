@@ -121,6 +121,45 @@ def cmd_state_put_remote(args) -> int:
     return 0
 
 
+def cmd_state_check_skip(args) -> int:
+    """集群 resume 判定：该 stage 对这个分区是否已到成功终态。
+
+    退出码即判定结果（给 shell 的 ``&&`` 用）::
+
+        0 = 已终态，调用方应跳过（不执行业务命令）
+        1 = 未终态 / 无记录，调用方应正常执行
+        2 = 用法或环境错误
+
+    终态规则来自 ``resume_policy.stage_terminal_statuses``——与本地 runner
+    同一份定义，避免"本地跳过、集群重跑"的漂移。
+    """
+    from .journal import get_item_status
+    from .resume_policy import is_terminal
+
+    run_id = args.run_id or os.environ.get("PIPELINE_RUN_ID", "")
+    if not run_id:
+        print("[resume] 缺少 run_id（--run-id 或 PIPELINE_RUN_ID）", file=sys.stderr)
+        return 2
+    if not (args.dataset and args.partition and args.stage):
+        print("[resume] 需要 --dataset / --partition / --stage", file=sys.stderr)
+        return 2
+    try:
+        row = get_item_status(run_id, dataset=args.dataset,
+                              partition=args.partition,
+                              variant=args.variant or "", stage=args.stage)
+    except Exception as exc:                       # 读不到状态不能当成"已完成"
+        print(f"[resume] 读取状态失败，按未完成处理: {exc!r}", file=sys.stderr)
+        return 1
+    if row is not None and is_terminal(row.get("status", ""), args.has_checks):
+        print(f"[resume] {args.dataset}/{args.partition}/{args.variant or '-'}/"
+              f"{args.stage} 已是 {row.get('status')}，跳过")
+        return 0
+    status = row.get("status") if row else "无记录"
+    print(f"[resume] {args.dataset}/{args.partition}/{args.variant or '-'}/"
+          f"{args.stage} 未完成（{status}），继续执行")
+    return 1
+
+
 def cmd_reconcile_journal(args) -> int:
     from .notify import render_summary, send_webhook
     from .state import reconcile_datasets
@@ -210,6 +249,14 @@ def build_parser() -> argparse.ArgumentParser:
                           choices=["pending", "generated", "verified", "failed"])
     add_journal_fields(p_remote)
     p_remote.set_defaults(func=cmd_state_put_remote)
+
+    p_skip = sp_sub.add_parser(
+        "check-skip", help="集群 resume 判定：已到终态则退出码 0（应跳过）")
+    p_skip.add_argument("--stage", required=True)
+    p_skip.add_argument("--has-checks", action="store_true",
+                        help="该 stage 配了质量闸门（终态只认 verified）")
+    add_journal_fields(p_skip)
+    p_skip.set_defaults(func=cmd_state_check_skip)
 
     rec = sub.add_parser("reconcile-journal", help="从状态日志对账（onExit 用）")
     rec.add_argument("--run-id", default=os.getenv("PIPELINE_RUN_ID", ""), required=True)

@@ -1,7 +1,7 @@
 # specargo
 
 ![unit-tests](https://github.com/1z5/specargo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：115 个离线用例（框架 111 + 领域示例 4），Python 3.11 + 3.12 -->
+<!-- unit-tests：124 个离线用例（框架 120 + 领域示例 4），Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/specargo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一个声明式批量数据管线框架：定义一次，本地可跑，也能编译成 Argo CRD 上集群。**
@@ -81,6 +81,7 @@ YAML spec ─► spec.py 解析/校验 ─► runner.py 本地执行 ─► chec
 | **数据质量** | `checks.py` 插件注册表（4 个通用检查）+ `spec.plugins` 显式加载领域检查；本地 runner 与集群 gate 共用同一套检查实现 |
 | **状态与追溯** | 本地：`state.py` 的 `pipeline_run` / `pipeline_item` 表（四元组主键 + run_id，旧库原地迁移）；集群：`journal.py` 把状态写成对象存储 key（`runs/<run>/_status/...`），不同 Pod 并发写不依赖共享盘 |
 | **集群侧收口（可选）** | `k8s.journal: true` 时编译产物自动加：每个 stage/gate 结束写状态、discover 写分区清单、`onExit` 调 `pipeline_cli.py reconcile-journal` 对账（差异非空则工作流失败）+ webhook 告警 |
+| **集群断点续跑（可选）** | `k8s.resume: true` 时每个 stage 启动前 `state check-skip`：已到成功终态则跳过（不重跑、不重复写产物）。终态规则与本地 runner **同一份实现**（`resume_policy`：有闸门只认 verified，无闸门 generated 即终态） |
 | **插件机制** | `plugins.py`：spec 顶层 `plugins: [模块名]`，按 spec 目录 / 父目录定位模块后 `importlib` 加载；加载失败启动期报 `SpecError`；框架**不 import** 领域代码 |
 | **可观测性** | `metrics.py` Prometheus text 格式指标（执行数 / 耗时分布 / 积压 / 对账缺失 / inflight；`stage_progress` 已定义但当前未接线） |
 | **存储抽象** | `artifacts.py` 对象存储契约 + 本地目录 / S3 兼容双实现，key 目录穿越防护；`objstore.py` 是集群内 put/get CLI；跨 Pod 走路径契约 `runs/<run_id>/<partition>/<stage>.<ext>` |
@@ -122,7 +123,7 @@ YAML
 specargo-compile pipelines/etl-demo.yaml --runtime /tmp/compiled/runtime.yaml \
   -o /tmp/compiled/etl-demo-prod.yaml
 
-# 4) 离线测试：115 例（框架 111 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
+# 4) 离线测试：124 例（框架 120 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
 for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 
 # 5) 集群冒烟（CI 自动跑；也可手动触发）
@@ -166,6 +167,7 @@ plugins: ["checks_tts"]      # 加载 examples/tts-asr/checks_tts.py，注册 as
 ```yaml
 k8s:
   journal: true          # 开启状态日志 + onExit 对账
+  resume: true           # 可选：已成功的 stage×分区直接跳过（集群断点续跑）
   notify_webhook: ""     # 可选：onExit 对账结果发送到钉钉/飞书/Slack
   objstore_env: {OBJSTORE_BUCKET: argo-artifacts}   # 可选：对象存储连接参数
 ```
@@ -181,12 +183,13 @@ k8s:
    可选发送 webhook。分区清单缺失时的策略：**工作流已失败**才跳过对账（不掩盖原失败）；
    **成功路径**却缺清单会直接失败（无法证明数据完整，防止假绿）。
 
-> 集群侧**断点续跑（skip）**尚未实现——Argo 的 retry/重跑仍会重新执行 task；
-> 状态日志目前只用于 onExit 对账，不作为 resume 依据（见 ROADMAP）。
+> 集群侧**断点续跑**需 `k8s.resume: true` 显式开启（默认关，与 CI 现有断言一致）。
+> 注意：跳过发生在 task 内部，Argo 侧仍会拉起 Pod；要省 Pod 需配合
+> WorkflowTemplate/`when`（见 ROADMAP）。
 
 ## 已验证 / 未验证
 
-**已验证（115 个离线用例 = 框架 111 + 领域示例 4，+ 集群 E2E）**：
+**已验证（124 个离线用例 = 框架 120 + 领域示例 4，+ 集群 E2E）**：
 
 - 框架 `tests/test_framework.py`（32 例）：spec 解析与严格校验、四类通用检查、runner 断点跳过 /
   依赖阻断 / 重试 / attempt 计数、对账按 variant 分组抓假绿、`spec2argo` 编译产物结构 /
@@ -390,7 +393,7 @@ examples/tts-asr/         领域插件示例（TTS 生成 + ASR 回检 + 对账�
 pipelines/                通用管线定义（dataset-build.yaml / etl-demo.yaml）
 k8s/                      CI 基础设施（object-store / artifact-repository / 历史 smoke）
 docs/                     架构（ARCHITECTURE.md）与计划（ROADMAP.md）
-tests/                    离线测试（框架 111 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
+tests/                    离线测试（框架 120 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
 Dockerfile                通用 CI 镜像（pip install specargo + moto S3）
 ```
 
