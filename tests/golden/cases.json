@@ -1,0 +1,36 @@
+[
+  {
+    "spec": "pipelines/etl-demo.yaml",
+    "golden": "etl-demo.yaml",
+    "overrides": {},
+    "name": null
+  },
+  {
+    "spec": "pipelines/dataset-build.yaml",
+    "golden": "dataset-build.yaml",
+    "overrides": {},
+    "name": null
+  },
+  {
+    "spec": "examples/tts-asr/pipelines/tts.yaml",
+    "golden": "tts-example.yaml",
+    "overrides": {},
+    "name": null
+  },
+  {
+    "spec": "pipelines/etl-demo.yaml",
+    "golden": "etl-demo-journal.yaml",
+    "overrides": {
+      "journal": true
+    },
+    "name": "etl-demo-journal"
+  },
+  {
+    "spec": "pipelines/etl-demo.yaml",
+    "golden": "etl-demo-podgc-off.yaml",
+    "overrides": {
+      "pod_gc_strategy": ""
+    },
+    "name": null
+  }
+]

@@ -42,7 +42,7 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 | 10 | 自动生成的 objstore `--file` 未加引号（路径含空格失败）；gate 未声明 dataset/variant 输入 | 路径统一 `shlex.quote`；gate inputs/args 补齐三个维度 |
 | 11 | 文档与实际不符（死命令 / 数字 / 夸大） | README / ARCHITECTURE / ROADMAP 按实测证据校正 |
 
-新增回归：`tests/test_p0_regressions.py`；离线套件合计 **101 例**（框架 97 + 领域示例 4），全部通过。
+新增回归：`tests/test_p0_regressions.py`；离线套件合计 **115 例**（框架 111 + 领域示例 4），全部通过。
 验证方式：本地四套件 + ETL / dataset 管线 E2E + 编译产物零残留 + 独立 Argo 模拟器
 （每个 task-item 独立目录、只共享对象存储）跑通 etl-demo 与 dataset-build 的编译产物；
 真实集群侧由 CI 的 kind smoke 继续验证。
@@ -86,27 +86,25 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 - ⬜ 集群侧断点续跑（skip）未实现：需要在 stage 启动时查状态日志并跳过；
 - ⬜ 真实部署的并发/规模验证（对象存储状态日志的对象数随 stage×partition 增长）。
 
+### 1.5 golden 编译产物 + RuntimeConfig（已完成）
+
+- `tests/golden/` + `tests/test_golden.py`：5 份 golden（普通/journal/podGC-off/领域插件），
+  编译器行为变更必须 `python3 tests/update_golden.py` 显式更新，否则 drift 失败；
+  drift 检测已用"改一个默认值"实测有效。
+- `app/runtime.py` `RuntimeConfig`：运行时配置从编译器里抽出，优先级
+  内置默认 < spec `runtime:`（旧名 `k8s:` 兼容）< CLI `--runtime`；类型/未知字段/
+  预留 env 在 load 期校验；`PIPELINE_RUN_ID` / `runs` 为固定契约（常量集中一处）。
+
 ### 2. 包化（pip install 可用）
 
 `pyproject.toml` + `src/pipeline/` 包结构 + `[project.scripts]`；extras：`tts` / `s3` / `dev`。
 包化后 `$PYTHONPATH` 不再是运行前提，示例可以只当普通用户目录使用。
 （当前是单仓库脚本 + `sys.path` 注入的最小形态。）
 
-### 3. `RuntimeConfig`（替代编译期硬编码）
-
-把镜像 / 命名空间 / 挂载 / `run_id` 环境变量名 / objstore endpoint / 整批 deadline 抽成
-`RuntimeConfig`（来源：spec `runtime:` 节、`--runtime runtime.yaml` 或 env），
-编译器不再持有任何业务默认值（`specargo:ci` 移到 CI 的 runtime 文件）。
-
-### 4. `StateStore` 协议
+### 3. `StateStore` 协议
 
 `state.py` 拆成 `StateStore` Protocol + `SqliteStateStore` 实现 + 泛型对账；
 集群写路径先明确"不写"或"单写者"，再谈并发。Postgres / Redis 等后端在有真实多写者需求前不做。
-
-### 5. golden 编译产物测试
-
-用固定 spec + 固定 runtime 生成编译产物快照（golden），CI 断言产物逐字节稳定；
-配合 `argo lint` 与"零残留模板变量"断言，把编译器的行为变化变成可 review 的 diff。
 
 ## 进行中 / 遗留
 

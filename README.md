@@ -1,7 +1,7 @@
 # specargo
 
 ![unit-tests](https://github.com/1z5/specargo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：101 个离线用例（框架 97 + 领域示例 4），Python 3.11 + 3.12 -->
+<!-- unit-tests：115 个离线用例（框架 111 + 领域示例 4），Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/specargo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一个声明式批量数据管线框架：定义一次，本地可跑，也能编译成 Argo CRD 上集群。**
@@ -85,6 +85,8 @@ YAML spec ─► spec.py 解析/校验 ─► runner.py 本地执行 ─► chec
 | **可观测性** | `metrics.py` Prometheus text 格式指标（执行数 / 耗时分布 / 积压 / 对账缺失 / inflight；`stage_progress` 已定义但当前未接线） |
 | **存储抽象** | `artifacts.py` 对象存储契约 + 本地目录 / S3 兼容双实现，key 目录穿越防护；`objstore.py` 是集群内 put/get CLI；跨 Pod 走路径契约 `runs/<run_id>/<partition>/<stage>.<ext>` |
 | **容器与编排** | 根目录 `Dockerfile`（moto S3 + `app/`）+ `k8s/object-store.yaml` / `artifact-repository.yaml`；CI 在 kind + Argo Workflows v3.7.18 上实测跑通（见「已验证」）。`k8s/workflow-etl-smoke.yaml` 是历史手写对照 |
+| **运行时配置** | `RuntimeConfig`（`runtime.py`）：镜像 / 命名空间 / SA / 挂载 / 对象存储 / deadline / podGC 集中一处；优先级：内置默认 < spec `runtime:` 节（旧名 `k8s:` 仍兼容）< CLI `--runtime runtime.yaml`（按 key 覆盖，一份 spec 多环境） |
+| **编译器回归** | golden 编译产物（`tests/golden/` + `tests/test_golden.py`）：编译器行为变更必须显式 `python3 tests/update_golden.py` 更新 golden，否则以 drift 失败——防"顺手改坏编译器" |
 | **成本与效率** | 并发与重试参数化、输入指纹避免重复计算、`--force` 受控重处理、stage 级 requests/limits 编译进 container；`nodeSelector`/`tolerations` 编译器尚未映射 |
 
 ## 快速开始
@@ -111,7 +113,16 @@ mkdir -p /tmp/compiled
 python3 app/spec2argo.py pipelines/etl-demo.yaml -o /tmp/compiled/etl-demo.yaml
 argo lint --offline /tmp/compiled/etl-demo.yaml
 
-# 4) 离线测试：101 例（框架 97 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
+# 3b) 同一份 spec 换执行环境：运行时配置按 key 覆盖（不动 spec）
+cat > /tmp/compiled/runtime.yaml <<'YAML'
+image: your-registry/specargo:v1
+namespace: data-platform
+service_account: argo-workflow
+YAML
+python3 app/spec2argo.py pipelines/etl-demo.yaml --runtime /tmp/compiled/runtime.yaml \
+  -o /tmp/compiled/etl-demo-prod.yaml
+
+# 4) 离线测试：115 例（框架 111 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
 for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 
 # 5) 集群冒烟（CI 自动跑；也可手动触发）
@@ -175,7 +186,7 @@ k8s:
 
 ## 已验证 / 未验证
 
-**已验证（101 个离线用例 = 框架 97 + 领域示例 4，+ 集群 E2E）**：
+**已验证（115 个离线用例 = 框架 111 + 领域示例 4，+ 集群 E2E）**：
 
 - 框架 `tests/test_framework.py`（32 例）：spec 解析与严格校验、四类通用检查、runner 断点跳过 /
   依赖阻断 / 重试 / attempt 计数、对账按 variant 分组抓假绿、`spec2argo` 编译产物结构 /
@@ -197,7 +208,10 @@ k8s:
 - E2E（本地）：ETL 管线全链路对账全绿、二次跑全部 resume-skip；dataset-build 全链路通过
 - E2E（模拟集群）：每个 task-item 使用独立目录、只共享对象存储，模拟跨 Pod 取数；
   etl-demo 与 dataset-build 的编译产物均跑通
-- 编译产物门禁：CI 对全部编译产物断言"零残留模板变量"（`{{params.*}}` / `{{partition.*}}`）
+- 编译产物门禁：CI 对全部编译产物断言"零残留模板变量"；golden 套件锁住编译器行为
+  （含 journal / podGC 关闭 / 领域插件三种形态），编译器 drift 会直接红
+- 运行时配置：`RuntimeConfig` 三级优先级与严格校验（`tests/test_runtime.py` 10 例）
+- golden 编译产物（`tests/test_golden.py` 4 例）：编译器 drift 直接失败
 - CI：`unit-tests` 在 Python 3.11 / 3.12 上跑全部离线套件 + 框架纯净度守卫；
   `k8s-smoke` 在 kind 多节点 + Argo Workflows v3.7.18 上提交 `spec2argo` 编译产物，
   并额外跑一次 `journal: true` 变体验证 onExit 对账（真实集群）
@@ -368,7 +382,7 @@ examples/tts-asr/         领域插件示例（TTS 生成 + ASR 回检 + 对账�
 pipelines/                通用管线定义（dataset-build.yaml / etl-demo.yaml）
 k8s/                      CI 基础设施（object-store / artifact-repository / 历史 smoke）
 docs/                     架构（ARCHITECTURE.md）与计划（ROADMAP.md）
-tests/                    离线测试（框架 97 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
+tests/                    离线测试（框架 111 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
 Dockerfile                通用 CI 镜像（moto S3 + app/）
 ```
 

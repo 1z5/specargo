@@ -42,6 +42,7 @@ from pathlib import Path
 
 import yaml
 
+from runtime import OBJSTORE_KEY_ROOT, RUN_ID_ENV, RuntimeConfig
 from spec import PipelineSpec, SpecError, Stage, load_spec
 
 # ---------------------------------------------------------------------------
@@ -124,7 +125,8 @@ def _artifact_key(artifact_name: str) -> str:
     上下游只约定 key 怎么算，不依赖编排器的 artifact 配对行为；
     run_id 用容器环境变量展开（由编译产物注入，不硬编码值）。
     """
-    return 'runs/$PIPELINE_RUN_ID/{{inputs.parameters.partition}}/%s' % _ext(artifact_name)
+    return '%s/$%s/{{inputs.parameters.partition}}/%s' % (
+        OBJSTORE_KEY_ROOT, RUN_ID_ENV, _ext(artifact_name))
 
 
 def _objstore_put_snippet(artifacts: dict[str, str]) -> str:
@@ -153,7 +155,7 @@ def _objstore_get_snippet(artifacts: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def _discover_env(spec: PipelineSpec, objstore_endpoint: str,
+def _discover_env(spec: PipelineSpec, runtime: RuntimeConfig,
                   dataset: str, variants: list[str],
                   *, journal: bool = False) -> list[dict]:
     env = [
@@ -162,7 +164,7 @@ def _discover_env(spec: PipelineSpec, objstore_endpoint: str,
          "value": json.dumps(variants or [""], ensure_ascii=False)},
     ]
     if journal:
-        env = _base_env(spec, objstore_endpoint) + env
+        env = _base_env(spec, runtime) + env
     return env
 
 
@@ -199,7 +201,8 @@ def _discover_script(cmd: str, dataset: str, variants: list[str],
         "print(json.dumps(items, ensure_ascii=False))\n"
         "PY\n"
         + ('python3 /app/objstore.py put --key '
-           '"runs/$PIPELINE_RUN_ID/_run/partitions.json" --file /tmp/out/items.json\n'
+           '"%s/$%s/_run/partitions.json" --file /tmp/out/items.json\n'
+           % (OBJSTORE_KEY_ROOT, RUN_ID_ENV)
            if journal else '')
     )
 
@@ -236,24 +239,24 @@ def _resolve_for_gate(value, *, spec: PipelineSpec, artifact_path: str):
     return value
 
 
-def _base_env(spec: PipelineSpec, objstore_endpoint: str) -> list[dict]:
+def _base_env(spec: PipelineSpec, runtime: RuntimeConfig) -> list[dict]:
     """所有集群容器共用：run_id / 对象存储端点 / 用户自定义对象存储 env。"""
     env = [
-        {"name": "PIPELINE_RUN_ID", "value": "{{workflow.name}}"},
-        {"name": "OBJSTORE_ENDPOINT", "value": objstore_endpoint},
+        {"name": RUN_ID_ENV, "value": "{{workflow.name}}"},
+        {"name": "OBJSTORE_ENDPOINT", "value": runtime.objstore_endpoint},
     ]
-    for name, value in ((spec.k8s or {}).get("objstore_env") or {}).items():
+    for name, value in runtime.objstore_env.items():
         env.append({"name": str(name), "value": str(value)})
     return env
 
 
-def _plugin_env(spec: PipelineSpec) -> list[dict]:
+def _plugin_env(spec: PipelineSpec, runtime: RuntimeConfig) -> list[dict]:
     """领域插件声明注入容器 env（本地 runner 与集群 gate 同源加载）。"""
     if not spec.plugins:
         return []
     env = [{"name": "PIPELINE_PLUGINS",
             "value": json.dumps(spec.plugins, ensure_ascii=False)}]
-    plugin_path = (spec.k8s or {}).get("plugin_path", "")
+    plugin_path = runtime.plugin_path
     if plugin_path:
         env.append({"name": "PIPELINE_PLUGIN_PATH", "value": str(plugin_path)})
     return env
@@ -262,7 +265,7 @@ def _plugin_env(spec: PipelineSpec) -> list[dict]:
 def _state_put_snippet(stage_name: str, status: str) -> str:
     """stage/gate 结束后把 item 终态写入对象存储状态日志（集群跨 Pod）。"""
     return (
-        'python3 /app/pipeline_cli.py state put-remote --run-id "$PIPELINE_RUN_ID" '
+        'python3 /app/pipeline_cli.py state put-remote --run-id "$%s" ' % RUN_ID_ENV +
         '--dataset "{{inputs.parameters.dataset}}" '
         '--partition "{{inputs.parameters.partition}}" '
         '--variant "{{inputs.parameters.variant}}" '
@@ -293,10 +296,10 @@ def _gate_snippet(stage: Stage, spec: PipelineSpec, *, journal: bool = False) ->
         "cat > /tmp/gate_config.json <<'JSON'",
         json.dumps(cfg, ensure_ascii=False, indent=0),
         "JSON",
-        "python3 /app/pipeline_cli.py gate --stage %s --artifact %s --checks '%s' "
-        "--check-config-file /tmp/gate_config.json --run-id \"$PIPELINE_RUN_ID\""
-        % (shlex.quote(stage.name), shlex.quote(local_path),
-           json.dumps(list(stage.checks), ensure_ascii=False)),
+        ("python3 /app/pipeline_cli.py gate --stage %s --artifact %s --checks '%s' "
+         "--check-config-file /tmp/gate_config.json --run-id \"$%s\""
+         % (shlex.quote(stage.name), shlex.quote(local_path),
+            json.dumps(list(stage.checks), ensure_ascii=False), RUN_ID_ENV)),
     ]
     if journal:
         lines[-1] += (
@@ -326,16 +329,17 @@ def _topo_order(stages: list[Stage]) -> list[Stage]:
 
 
 def _on_exit_template(spec: PipelineSpec, *, image: str, pull_policy: str,
-                      objstore_endpoint: str, use_discover: bool,
+                      runtime: RuntimeConfig, use_discover: bool,
                       partition_items: list[dict], final_stage: str,
                       terminal_statuses: list[str]) -> dict:
     """onExit：从对象存储状态日志对账，差异非空则让工作流失败（+ 可选告警）。"""
     lines = ["set -e"]
     if use_discover:
         lines += [
-            "if ! python3 /app/objstore.py get "
-            '--key "runs/$PIPELINE_RUN_ID/_run/partitions.json" '
-            "--file /tmp/partitions.json; then",
+            ("if ! python3 /app/objstore.py get "
+             '--key "%s/$%s/_run/partitions.json" '
+             "--file /tmp/partitions.json; then"
+             % (OBJSTORE_KEY_ROOT, RUN_ID_ENV)),
             '  if [ "$PIPELINE_WORKFLOW_STATUS" = "Failed" ] || '
             '[ "$PIPELINE_WORKFLOW_STATUS" = "Error" ]; then',
             '    echo "[onExit] 工作流已失败且没有分区清单，跳过对账"',
@@ -350,13 +354,13 @@ def _on_exit_template(spec: PipelineSpec, *, image: str, pull_policy: str,
         lines += ["cat > /tmp/partitions.json <<'JSON'",
                   json.dumps(partition_items, ensure_ascii=False), "JSON"]
     lines.append(
-        'python3 /app/pipeline_cli.py reconcile-journal --run-id "$PIPELINE_RUN_ID" '
-        "--partitions-file /tmp/partitions.json --final-stage %s "
-        "--terminal-statuses '%s' --report-json /tmp/reconcile-report.json"
-        % (shlex.quote(final_stage), json.dumps(terminal_statuses)))
-    env = _base_env(spec, objstore_endpoint)
+        ('python3 /app/pipeline_cli.py reconcile-journal --run-id "$%s" '
+         "--partitions-file /tmp/partitions.json --final-stage %s "
+         "--terminal-statuses '%s' --report-json /tmp/reconcile-report.json"
+         % (RUN_ID_ENV, shlex.quote(final_stage), json.dumps(terminal_statuses))))
+    env = _base_env(spec, runtime)
     env.append({"name": "PIPELINE_WORKFLOW_STATUS", "value": "{{workflow.status}}"})
-    webhook = (spec.k8s or {}).get("notify_webhook", "")
+    webhook = runtime.notify_webhook
     if webhook:
         env.append({"name": "NOTIFY_WEBHOOK", "value": str(webhook)})
     return {
@@ -393,21 +397,25 @@ def _assert_no_spec_templates(wf: dict, source: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
-                     namespace: str = "argo") -> dict:
-    k8s = getattr(spec, "k8s", None) or {}
-    # 默认镜像只是明确占位：编译器不替使用者决定业务镜像，
-    # 真实镜像由 pipelines/*.yaml 的 k8s.image 提供（本轮不改示例里的镜像名）。
-    image = k8s.get("image", "pipeline-image:latest")
-    pull_policy = k8s.get("image_pull_policy", "IfNotPresent")
-    volumes = k8s.get("volumes", {}) or {}
-    mounts = k8s.get("mounts", {}) or {}
-    objstore_endpoint = k8s.get(
-        "objstore_endpoint", "http://object-store.argo.svc.cluster.local:5000")
-    service_account = k8s.get("service_account", "default")
-    active_deadline = int(k8s.get("active_deadline_seconds", 1800))
-    journal = bool(k8s.get("journal", False))
+                     namespace: str | None = None,
+                     runtime: RuntimeConfig | None = None) -> dict:
+    """编译 spec 为 Argo Workflow。
+
+    ``runtime``：执行环境配置；缺省从 spec 的 ``runtime:`` 节（旧名 ``k8s:``）
+    读取。namespace 优先级：显式参数 > runtime.namespace > "argo"。
+    """
+    runtime = runtime or RuntimeConfig.from_spec(spec)
+    namespace = namespace or runtime.namespace
+    image = runtime.image
+    pull_policy = runtime.image_pull_policy
+    volumes = runtime.volumes
+    mounts = runtime.mounts
+    objstore_endpoint = runtime.objstore_endpoint
+    service_account = runtime.service_account
+    active_deadline = runtime.active_deadline_seconds
+    journal = runtime.journal
     # 默认成功后清理 Pod（默认行为不变）；CI 需要保留 Pod 做跨节点断言时可置空
-    pod_gc_strategy = str(k8s.get("pod_gc_strategy", "OnWorkflowSuccess"))
+    pod_gc_strategy = runtime.pod_gc_strategy
 
     # artifact 名 -> 产出它的 stage（用于给下游接线 get）
     produced_by: dict[str, str] = {}
@@ -446,7 +454,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
                 "command": ["sh", "-c"],
                 "args": [_discover_script(discover_cmd, discover_dataset,
                                           variants or [""], journal=journal)],
-                "env": _discover_env(spec, objstore_endpoint, discover_dataset,
+                "env": _discover_env(spec, runtime, discover_dataset,
                                      variants or [""], journal=journal),
                 "volumeMounts": volume_mounts,
             },
@@ -486,7 +494,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
             "imagePullPolicy": pull_policy,
             "command": ["sh", "-c"],
             "args": [script],
-            "env": _base_env(spec, objstore_endpoint),
+            "env": _base_env(spec, runtime),
         }
         if volume_mounts:
             container["volumeMounts"] = volume_mounts
@@ -523,7 +531,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
                 "imagePullPolicy": pull_policy,
                 "command": ["sh", "-c"],
                 "args": [_gate_snippet(stage, spec, journal=journal)],
-                "env": _base_env(spec, objstore_endpoint) + _plugin_env(spec),
+                "env": _base_env(spec, runtime) + _plugin_env(spec, runtime),
             }
             if volume_mounts:
                 gate_container["volumeMounts"] = volume_mounts
@@ -589,7 +597,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
                     else ["generated", "verified"])
         templates.append(_on_exit_template(
             spec, image=image, pull_policy=pull_policy,
-            objstore_endpoint=objstore_endpoint, use_discover=use_discover,
+            runtime=runtime, use_discover=use_discover,
             partition_items=partition_items, final_stage=final_stage.name,
             terminal_statuses=terminal))
 
@@ -597,7 +605,7 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
         "entrypoint": "main",
         "activeDeadlineSeconds": active_deadline,
         "ttlStrategy": {"secondsAfterCompletion": 3600},
-        "serviceAccountName": service_account,
+        "serviceAccountName": runtime.service_account,
         "volumes": [{"name": n, **v} for n, v in volumes.items()],
         "templates": templates,
     }
@@ -628,11 +636,19 @@ def main() -> int:
     parser.add_argument("spec", help="pipelines/*.yaml")
     parser.add_argument("-o", "--output", help="输出路径（默认 stdout）")
     parser.add_argument("--name", help="workflow 名（默认用 spec.name）")
-    parser.add_argument("--namespace", default="argo")
+    parser.add_argument("--namespace", default=None,
+                        help="命名空间（缺省用 runtime.namespace）")
+    parser.add_argument("--runtime", help="运行时配置 YAML（按 key 覆盖 spec 的 runtime/k8s 节）")
     args = parser.parse_args()
 
     spec = load_spec(args.spec)
-    wf = compile_workflow(spec, name=args.name, namespace=args.namespace)
+    runtime = RuntimeConfig.from_spec(spec)
+    if args.runtime:
+        runtime.apply_mapping(
+            yaml.safe_load(Path(args.runtime).read_text(encoding="utf-8")) or {},
+            where=args.runtime)
+    wf = compile_workflow(spec, name=args.name, namespace=args.namespace,
+                          runtime=runtime)
     text = yaml.safe_dump(wf, allow_unicode=True, sort_keys=False, width=120)
 
     header = ("# 由 spec2argo 从 %s 自动生成，请勿手改\n"

@@ -121,7 +121,9 @@ class PipelineSpec:
     description: str = ""
     # 批次级参数（可被 CLI / Argo arguments 覆盖）
     params: dict = field(default_factory=dict)
-    # 集群执行目标（spec2argo 读取；本地 runner 忽略）
+    # 执行目标运行时配置（spec2argo 读取；本地 runner 忽略）。
+    # ``k8s`` 是旧名，仍作为别名接受；两者同时非空会报错（见 runtime.py）。
+    runtime: dict = field(default_factory=dict)
     k8s: dict = field(default_factory=dict)
     # 分区来源：list / range / discover（discover 时由 discover_command 产出）
     partitions_source: str = "list"
@@ -140,7 +142,7 @@ _VAR = re.compile(r"\{\{\s*([a-zA-Z_][\w.]*)\s*\}\}")
 
 # 允许的字段集合：拼错/写错键必须报错，不能静默丢弃（静默丢弃会让整条管线"假绿"）。
 _ALLOWED_TOP = {"name", "description", "params", "partitions", "variants",
-                "stages", "k8s", "plugins"}
+                "stages", "k8s", "runtime", "plugins"}
 _ALLOWED_STAGE = {
     "name", "command", "inputs", "outputs", "dependencies", "retry", "timeout",
     "checks", "when", "artifacts", "consumes", "check_config", "resources",
@@ -162,12 +164,6 @@ _ARTIFACT_NAME_RE = re.compile(r"^(?!\.+$)[A-Za-z0-9_.-]+$")
 # （中文分区键可用；引号/空格/$ 等 shell 元字符会破坏脚本与 key，拒绝）。
 # 额外排除纯 "." / ".."（作为路径段可穿越；本地对象存储会拒绝而 S3 不会，必须统一）。
 _SAFE_KEY_RE = re.compile(r"^(?!\.+$)[\w.-]+$")
-_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# k8s 运行时配置的已知字段（拼错就报错，不然会被静默忽略）。
-_ALLOWED_K8S = {"image", "image_pull_policy", "volumes", "mounts",
-                "objstore_endpoint", "service_account", "active_deadline_seconds",
-                "plugin_path", "journal", "notify_webhook", "objstore_env",
-                "pod_gc_strategy"}
 # discover 命令在加载期执行：必须有超时，否则一个挂住的命令会卡死 load_spec。
 _DISCOVER_TIMEOUT_SECONDS = 60
 
@@ -264,48 +260,21 @@ def validate_spec(spec: PipelineSpec, *, path: str | Path = "") -> None:
     for key in spec.params:
         if not isinstance(key, str) or not _PARAM_NAME_RE.match(key):
             raise SpecError(f"{where}: 参数名 {key!r} 非法（只允许字母/数字/下划线）")
-    if spec.k8s:
-        _reject_unknown_keys(spec.k8s, _ALLOWED_K8S, f"{where}: k8s")
-        k8s = spec.k8s
-        if "journal" in k8s and not isinstance(k8s["journal"], bool):
-            raise SpecError(f"{where}: k8s.journal 必须是布尔值，实际 {k8s['journal']!r}")
-        for key in ("notify_webhook", "plugin_path", "image", "image_pull_policy",
-                    "objstore_endpoint", "service_account", "pod_gc_strategy"):
-            if key in k8s and not isinstance(k8s[key], str):
-                raise SpecError(f"{where}: k8s.{key} 必须是字符串，实际 {k8s[key]!r}")
-        if "active_deadline_seconds" in k8s and (
-                isinstance(k8s["active_deadline_seconds"], bool)
-                or not isinstance(k8s["active_deadline_seconds"], int)):
-            raise SpecError(
-                f"{where}: k8s.active_deadline_seconds 必须是整数，"
-                f"实际 {k8s['active_deadline_seconds']!r}")
-        if k8s.get("journal") and any(not part.dataset for part in spec.partitions):
-            raise SpecError(
-                f"{where}: k8s.journal 要求每个分区的 dataset 非空"
-                f"（状态日志 key 需要 dataset 维度）")
-        if "objstore_env" in k8s:
-            obj_env = k8s["objstore_env"]
-            if not isinstance(obj_env, dict):
-                raise SpecError(f"{where}: k8s.objstore_env 必须是映射（环境变量名 -> 值）")
-            reserved = {"PIPELINE_RUN_ID", "OBJSTORE_ENDPOINT", "PIPELINE_PLUGINS",
-                        "PIPELINE_PLUGIN_PATH", "PIPELINE_WORKFLOW_STATUS",
-                        "NOTIFY_WEBHOOK"}
-            for name, value in obj_env.items():
-                if not isinstance(name, str) or not _ENV_NAME_RE.match(name):
-                    raise SpecError(f"{where}: k8s.objstore_env 变量名非法: {name!r}")
-                if name in reserved:
-                    raise SpecError(
-                        f"{where}: k8s.objstore_env 不允许覆盖框架保留变量 {name}")
-                if not isinstance(value, str):
-                    raise SpecError(
-                        f"{where}: k8s.objstore_env[{name!r}] 必须是字符串，"
-                        f"实际 {value!r}")
+    # 执行目标配置校验（runtime/k8s 的字段与类型由 RuntimeConfig 统一校验）
+    from runtime import RuntimeConfig                     # 函数内 import：避免循环依赖
+    RuntimeConfig.from_spec(spec)
+
     for module in spec.plugins:
-        if not isinstance(module, str) or not module.strip():
-            raise SpecError(f"{where}: plugins 元素必须是非空模块名，实际 {module!r}")
         if not re.match(r"^[A-Za-z_][\w.]*$", module):
             raise SpecError(
-                f"{where}: plugins 模块名 {module!r} 非法（只允许字母/数字/下划线/点）")
+                f"{where}: plugins 模块名 {module!r} 非法"
+                f"（只允许字母/数字/下划线/点，且不以数字开头）")
+    if (spec.runtime or spec.k8s).get("journal") and any(
+            not part.dataset for part in spec.partitions):
+        raise SpecError(
+            f"{where}: journal 要求每个分区的 dataset 非空"
+            f"（状态日志 key 需要 dataset 维度）")
+
     if not spec.stages:
         raise SpecError(f"{where}: stages 不能为空（没有任何 stage 的管线会静默成功）")
     if not spec.partitions:
@@ -658,6 +627,8 @@ def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
         description=description,
         params=params,
         k8s=dict(raw_k8s or {}),
+        runtime=(dict(raw["runtime"]) if isinstance(raw.get("runtime"), dict)
+                 else ({} if raw.get("runtime") in (None, "") else raw["runtime"])),
         partitions_source=source,
         discover_command=str(part_cfg.get("command", "")),
         plugins=plugins,
