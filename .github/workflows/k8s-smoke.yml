@@ -5,7 +5,7 @@ name: k8s-smoke
 # 这一步是为了把"未在真实集群跑过"变成"已在 CI 集群跑通"。
 on:
   push:
-    paths: ["k8s/**", "app/**", "pipelines/**", "examples/**", "Dockerfile",
+    paths: ["k8s/**", "src/**", "pipelines/**", "examples/**", "Dockerfile",
             ".github/workflows/k8s-smoke.yml"]
   workflow_dispatch:
 
@@ -18,6 +18,15 @@ jobs:
 
       # ---- 1. 起 kind 集群（K8s in Docker，单节点）----
       # kind-action 的 config 输入要的是文件路径，不是内联内容
+      - name: 安装框架包（编译与断言都用 specargo）
+        run: |
+          set -e
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "PyYAML>=6.0"
+          python3 -m pip install -e .
+          python3 -c "import specargo; print('specargo', specargo.__version__)"
+          specargo --help > /dev/null
+
       - name: 写 kind 多节点配置
         run: |
           cat > /tmp/kind-config.yaml <<'YAML'
@@ -140,9 +149,8 @@ jobs:
           python3 - <<'PY'
           import sys
           import yaml
-          sys.path.insert(0, 'app')
-          from spec import load_spec
-          from spec2argo import compile_workflow
+          from specargo.spec import load_spec
+          from specargo.spec2argo import compile_workflow
 
           spec = load_spec('pipelines/etl-demo.yaml')
           spec.k8s['pod_gc_strategy'] = ''
@@ -172,9 +180,8 @@ jobs:
           python3 - <<'PY'
           import sys
           import yaml
-          sys.path.insert(0, 'app')
-          from spec import load_spec
-          from spec2argo import compile_workflow
+          from specargo.spec import load_spec
+          from specargo.spec2argo import compile_workflow
 
           spec = load_spec('pipelines/etl-demo.yaml')
           spec.k8s['journal'] = True

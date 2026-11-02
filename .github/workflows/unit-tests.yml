@@ -53,13 +53,17 @@ jobs:
       - name: 校验无隐式依赖（import 全部框架模块）
         run: |
           set -e
-          cd app
           for m in spec runner state checks resume metrics argo_io objstore spec2argo \
-                   artifacts manifest dataset_steps etl_steps plugins envcompat \
-                   legacy_state_migration journal pipeline_cli notify runtime; do
-            python3 -c "import $m" || { echo "❌ $m 导入失败（缺依赖？）"; exit 1; }
+                   plugins envcompat legacy_state_migration journal pipeline_cli notify \
+                   runtime subprocess_env cli; do
+            python3 -c "import specargo.$m" || { echo "❌ $m 导入失败（缺依赖？）"; exit 1; }
           done
-          echo "✅ 全部框架模块可离线导入"
+          for m in etl_steps dataset_steps manifest; do
+            python3 -c "import specargo.examples.$m" || { echo "❌ 示例步骤 $m 导入失败"; exit 1; }
+          done
+          python3 -m specargo --help > /dev/null
+          specargo --help > /dev/null
+          echo "✅ 全部框架模块可离线导入（包化后）"
 
       - name: 跑框架离线测试（全部套件）
         run: |
@@ -80,13 +84,10 @@ jobs:
       - name: 校验 pipeline 定义可加载（严格模式）
         run: |
           set -e
-          cd app
-          for f in ../pipelines/*.yaml ../examples/tts-asr/pipelines/*.yaml; do
+          for f in pipelines/*.yaml examples/tts-asr/pipelines/*.yaml; do
             echo "--- $f ---"
             python3 -c "
-          import sys
-          sys.path.insert(0, '.')
-          from spec import load_spec
+          from specargo.spec import load_spec
           s = load_spec('$f')
           print(f'  ✓ {s.name}: {len(s.stages)} stages, {len(s.partitions)} partitions, {len(s.plugins)} plugins')
           "
@@ -98,7 +99,7 @@ jobs:
           cd examples/tts-asr
           python3 -c "
           import _bootstrap, checks_tts
-          from checks import available
+          from specargo.checks import available
           assert 'asr_three_state' in available(), '领域插件未注册'
           print('✅ 领域插件通过 spec.plugins 显式加载')
           "
@@ -106,9 +107,8 @@ jobs:
       - name: runner 真跑一次真实 pipeline（不能只 dry-run）
         run: |
           set -e
-          cd app
           rm -rf /tmp/ci-run && mkdir -p /tmp/ci-run
-          python3 runner.py ../pipelines/etl-demo.yaml \
+          specargo-run pipelines/etl-demo.yaml \
             --state-db /tmp/ci-run/s.db --workdir /tmp/ci-run | tee /tmp/ci-run/out.txt
           # 对账必须全绿（曾出现"CI 绿但本地 pipeline 跑不通"的回归：
           # YAML 声明 app_dir: "" 而 Runner 用 setdefault 不覆盖 -> 渲染出 /etl_steps.py）
@@ -118,12 +118,11 @@ jobs:
       - name: 断言渲染结果无空路径
         run: |
           set -e
-          cd app
-          OUT=$(python3 runner.py ../pipelines/etl-demo.yaml --dry-run 2>&1)
+          OUT=$(specargo-run pipelines/etl-demo.yaml --dry-run 2>&1)
           echo "$OUT" | head -6
-          # app_dir 为空时命令会变成 `python3 /etl_steps.py`（根目录），必须拦住
+          # 包化后业务命令应为 `-m specargo.examples.*`，不能再出现裸脚本路径
           if echo "$OUT" | grep -qE "python3 /[a-z_]+\.py"; then
-            echo "❌ 命令里出现根目录脚本路径，app_dir 未注入"
+            echo "❌ 命令里出现根目录脚本路径"
             exit 1
           fi
           echo "✅ 渲染路径正常"
@@ -134,7 +133,7 @@ jobs:
           mkdir -p /tmp/compiled
           for f in pipelines/*.yaml examples/tts-asr/pipelines/*.yaml; do
             echo "--- 编译 $f ---"
-            python3 app/spec2argo.py "$f" -o "/tmp/compiled/$(basename "$f")"
+            specargo-compile "$f" -o "/tmp/compiled/$(basename "$f")"
           done
 
       - name: 断言编译产物无未解析模板变量（argo lint 不检查这个）
