@@ -107,7 +107,7 @@ argo lint --offline /tmp/compiled/tts.yaml
 |---|---|
 | `examples → framework` | 允许：本示例 import 框架导出的接口（`checks.register`、spec 语义、环境契约） |
 | `framework → examples` | **禁止**：`app/**` 不得 import 本目录的任何模块（CI grep 守卫），领域检查只能由 `plugins:` 显式加载 |
-| 环境变量 | 框架契约是 `PIPELINE_*`（如 `PIPELINE_RUN_ID` / `PIPELINE_STATE_DB`）；本示例自己的 `TTS_*`（音色 / 格式等）只属于 `config.py`。框架对旧的 `TTS_RUN_ID` / `TTS_STATE_DB` / `TTS_ARGO_*` / `TTS_INPUT_DIR` 保留一个版本的兼容读取（`app/envcompat.py`） |
+| 环境变量 | 框架契约是 `PIPELINE_*`（如 `PIPELINE_RUN_ID` / `PIPELINE_STATE_DB`）；本示例自己的 `TTS_*`（音色 / 格式等）只属于 `config.py`。框架对旧的 `TTS_RUN_ID` / `TTS_STATE_DB` / `TTS_ARGO_*` 保留一个版本的兼容读取（`app/envcompat.py`）；workflow 内的 `PIPELINE_INPUT_DIR` 是编排本地变量，不做回退 |
 | 状态与对账 | 框架 `state.py` 提供通用 `pipeline_run` / `pipeline_item` 状态表；本示例的领域对账（书籍/章节口径）在 `summary.py` + `domain_state.py` 里，不进入框架 |
 | Argo 编排 | 框架提供 `app/spec2argo.py` 编译器与根 `k8s/` 的 CI 基础设施；本目录 `k8s/` 是领域示例，未进 CI |
 

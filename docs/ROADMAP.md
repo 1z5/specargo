@@ -69,7 +69,7 @@ script 型 template、synchronization、suspend、onExit 等尚未映射（见�
   领域测试）；框架层 `app/**` 不含领域字样（CI 纯净度守卫，仅 `envcompat.py` /
   `legacy_state_migration.py` 两个兼容文件例外）。
 - **契约中性化**：环境变量 `PIPELINE_RUN_ID` / `PIPELINE_STATE_DB` / `PIPELINE_ARGO_*` /
-  `PIPELINE_INPUT_DIR`（旧 `TTS_*` 由 `envcompat.py` 回退一版）；镜像 / kind 集群名
+  `PIPELINE_INPUT_DIR`（workflow 本地变量，不回退；旧 `TTS_RUN_ID` / `TTS_STATE_DB` / `TTS_ARGO_*` 由 `envcompat.py` 回退一版）；镜像 / kind 集群名
   `specargo:ci` / `specargo`；状态表 `pipeline_run` / `pipeline_item`，列
   `dataset` / `partition` / `variant`（旧库启动时原地迁移）。
 - **插件化**：框架层不再 `import checks_tts`；领域检查由 spec 顶层 `plugins: [模块名]`

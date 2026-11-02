@@ -7,7 +7,7 @@
 2. 没配 checks 的 stage：旧实现永远无法 resume（状态是 generated，只认 verified），
    且最终对账必然 not_verified → 管线永远失败。等于隐性强制每 stage 配闸门。
 3. 编译器：spec.params 不进 workflow arguments、variant/dataset 扇出恒为空、
-   check_config 不解析 → tts/dataset-build 的编译产物不可用。
+   check_config 不解析 → 示例管线的编译产物不可用。
 4. 集群 gate：读节点本地路径、不 objstore get（靠调度恰好同节点才过）。
 
 领域示例相关断言只作为"插件/目录产物"边界，不依赖任何领域模块。

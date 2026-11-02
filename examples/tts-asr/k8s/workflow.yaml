@@ -2,7 +2,7 @@
 # 这是 TTS 管线的 Argo 版本，用于说明 stage/依赖/重试/artifact 的写法。
 # 它引用 registry.example.com 镜像与 tts-state/output/books 三个 PVC，
 # 需要自备镜像与存储才能跑；CI 只对它做 argo lint schema 校验。
-# 已在集群实测的框架侧版本见 ../../k8s/workflow-etl-smoke.yaml。
+# 已在集群实测的框架侧版本见 ../../../k8s/workflow-etl-smoke.yaml。
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata:

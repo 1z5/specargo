@@ -194,7 +194,7 @@ load_spec(path) ──► spec.plugins = ["checks_tts"]
 
 | 契约 | 框架命名 | 兼容 / 迁移 |
 |---|---|---|
-| 运行与路径环境变量 | `PIPELINE_RUN_ID` / `PIPELINE_STATE_DB` / `PIPELINE_INPUT_DIR` / `PIPELINE_ARGO_OUTPUTS` / `PIPELINE_ARGO_PARAM_DIR` / `PIPELINE_ARGO_ARTIFACT_DIR` | 旧 `TTS_*` 由 `envcompat.py` 回退读取，保留一个版本 |
+| 运行与路径环境变量 | `PIPELINE_RUN_ID` / `PIPELINE_STATE_DB` / `PIPELINE_ARGO_OUTPUTS` / `PIPELINE_ARGO_PARAM_DIR` / `PIPELINE_ARGO_ARTIFACT_DIR`（workflow 内另有 `PIPELINE_INPUT_DIR`） | `TTS_RUN_ID` / `TTS_STATE_DB` / `TTS_ARGO_*` 由 `envcompat.py` 回退读取，保留一个版本；`PIPELINE_INPUT_DIR` 是编排本地变量，不做回退 |
 | 状态库 | 表 `pipeline_run` / `pipeline_item`；列 `dataset` / `partition` / `variant` / `stage` / `status` / `attempt` / `run_id` | 打开旧库时由 `legacy_state_migration.py` 原地迁移（`ALTER TABLE RENAME`，幂等，数据保留）；`schema_version` 表记录版本 |
 | 对象存储 key | `runs/<run_id>/<partition>/<stage>.<ext>` | run_id 取 `PIPELINE_RUN_ID`，编译器注入 `{{workflow.name}}` |
 | 镜像 / 集群 | 镜像 `specargo:ci`；kind 集群名 `specargo` | — |

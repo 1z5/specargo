@@ -37,7 +37,7 @@ jobs:
         run: |
           set -e
           # envcompat.py / legacy_state_migration.py 是唯一的旧前缀兼容层，允许例外。
-          MATCHES=$(grep -rniE '(^|[^A-Za-z0-9])(tts|asr|audiobook|narration|book_slug|voice|audio|openai)([^A-Za-z0-9]|$)|音色|书籍|章节|语音|音频' app/ --exclude-dir='__pycache__' \
+          MATCHES=$(grep -rniE '(^|[^A-Za-z0-9])(tts|asr|audiobook|narration|book|chapter|voice|audio|openai|speech|whisper|azure|cedar|marin)([^A-Za-z]|$)|音色|书籍|章节|语音|音频' app/ --exclude-dir='__pycache__' \
             | grep -vE 'app/(envcompat|legacy_state_migration)\.py' || true)
           if [ -n "$MATCHES" ]; then
             echo "❌ 框架层出现领域残留（应放到 examples/）："
