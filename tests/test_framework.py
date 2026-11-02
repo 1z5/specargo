@@ -13,6 +13,10 @@ import checks_tts  # noqa: E402,F401  注册领域检查
 from runner import Runner  # noqa: E402
 import state as st  # noqa: E402
 
+# 测试里多处需要仓根与应用目录
+ROOT = Path(__file__).resolve().parents[1]
+APP_DIR = ROOT / "app"
+
 
 # ---------------- spec ----------------
 
@@ -494,6 +498,107 @@ def test_compile_workflow_uses_spec_name():
     # 显式传 name 必须生效（不被内部循环变量覆盖）
     wf2 = compile_workflow(spec, name="custom-name")
     assert wf2["metadata"]["name"] == "custom-name", wf2["metadata"]["name"]
+
+
+# ===================== 通用数据集构建（manifest / 清洗 / 分片）=====================
+
+def test_shard_assignment_is_deterministic():
+    """分片必须确定性：同一个 key 永远同一片，且与遍历顺序无关（训练可复现的前提）。"""
+    from manifest import shard_of
+
+    keys = ["p1-%04d" % i for i in range(200)]
+    first = {k: shard_of(k, 4) for k in keys}
+    # 换顺序重算，结果必须一致
+    second = {k: shard_of(k, 4) for k in reversed(keys)}
+    assert first == second
+    # 分片号落在合法区间，且没有被完全打偏（4 片应有基本均匀的分布）
+    assert set(first.values()) <= {0, 1, 2, 3}
+    assert len(set(first.values())) == 4, set(first.values())
+
+
+def test_manifest_verify_detects_corruption_and_missing_shard():
+    """manifest 校验必须能抓出：分片被改、分片缺失、条数对不上。"""
+    import json
+    import tempfile
+    from manifest import Manifest, ShardInfo, file_sha256
+
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        (base / "shards").mkdir()
+        f0 = base / "shards" / "s0.jsonl"
+        f1 = base / "shards" / "s1.jsonl"
+        f0.write_text('{"id":"a"}\n{"id":"b"}\n', encoding="utf-8")
+        f1.write_text('{"id":"c"}\n', encoding="utf-8")
+
+        m = Manifest(dataset="t", version="v1", shard_count=2, rows=3, shards=[
+            ShardInfo(0, "shards/s0.jsonl", 2, f0.stat().st_size, file_sha256(f0)),
+            ShardInfo(1, "shards/s1.jsonl", 1, f1.stat().st_size, file_sha256(f1)),
+        ])
+        assert m.verify(base) == [], m.verify(base)
+
+        # 改一个字节 -> 校验和/大小不符
+        f0.write_text('{"id":"a"}\n{"id":"X"}\n', encoding="utf-8")
+        assert m.verify(base), "内容被改但校验通过"
+
+        # 删掉分片 -> 分片缺失
+        f0.write_text('{"id":"a"}\n{"id":"b"}\n', encoding="utf-8")
+        f1.unlink()
+        problems = m.verify(base)
+        assert any("缺失" in p for p in problems), problems
+
+
+def test_clean_dedups_and_quarantines():
+    """清洗：去重按 id、坏行进隔离区且不带进合格集。"""
+    import json
+    import subprocess
+    import sys as _sys
+
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        raw = base / "raw.jsonl"
+        rows = [
+            {"id": "a", "text": "  多余   空白  "},
+            {"id": "a", "text": "重复主键"},
+            {"id": "", "text": "空主键"},
+            {"id": "b"},
+            {"id": "c", "text": "正常一条"},
+        ]
+        raw.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                       encoding="utf-8")
+        out, quar = base / "clean.jsonl", base / "quarantine.jsonl"
+        rc = subprocess.run(
+            [_sys.executable, str(APP_DIR / "dataset_steps.py"), "clean",
+             "--in", str(raw), "--out", str(out), "--quarantine", str(quar)],
+            capture_output=True, text=True,
+        )
+        assert rc.returncode == 0, rc.stderr
+        kept = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines() if l.strip()]
+        assert [r["id"] for r in kept] == ["a", "c"], kept          # 去重 + 排序
+        assert kept[0]["text"] == "多余 空白", kept[0]              # 空白已折叠
+        bad = [json.loads(l) for l in quar.read_text(encoding="utf-8").splitlines() if l.strip()]
+        assert len(bad) == 3 and all("rule" in b for b in bad), bad  # 坏行带规则编号
+
+
+def test_dataset_build_pipeline_end_to_end():
+    """真实跑 dataset-build 管线：清洗→分片→manifest 自校验，全绿。"""
+    from runner import Runner
+
+    spec = load_spec(str(ROOT / "pipelines" / "dataset-build.yaml"))
+    with tempfile.TemporaryDirectory() as d:
+        result = Runner(spec, state_db=str(Path(d) / "s.db"), workdir=Path(d), verbose=False).run()
+        assert result.ok, [(r.stage, r.status, r.detail[:100]) for r in result.runs]
+
+        # manifest 落盘且能被独立校验（模拟下游对账）
+        import subprocess, sys as _sys
+        manifests = sorted((Path(d) / "out" / "manifest").glob("*.json"))
+        assert manifests, "没有产出 manifest"
+        for mf in manifests:
+            rc = subprocess.run(
+                [_sys.executable, str(APP_DIR / "manifest.py"), "verify",
+                 "--manifest", str(mf), "--base-dir", str(Path(d) / "out")],
+                capture_output=True, text=True,
+            )
+            assert rc.returncode == 0, rc.stdout + rc.stderr
 
 
 if __name__ == "__main__":

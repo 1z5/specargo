@@ -142,7 +142,9 @@ def _command(artifact: Path, config: dict, ctx: dict) -> CheckResult:
     context = dict(ctx or {})
     context.setdefault("artifact", str(artifact))
     rendered = render(cmd, context)
-    proc = subprocess.run(rendered, shell=True, capture_output=True, text=True)
+    # 与任务同工作目录执行（框架在 ctx 里注入 workdir；单测可直接调 run_check 不带该键）
+    cwd = context.get("workdir") or None
+    proc = subprocess.run(rendered, shell=True, capture_output=True, text=True, cwd=cwd)
     ok = proc.returncode == 0
     return CheckResult(ok, metric=str(proc.returncode),
                        detail=(proc.stdout or "") + (proc.stderr or ""))

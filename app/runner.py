@@ -131,6 +131,9 @@ class Runner:
     # ------------------------------------------------------------------
     def _checks(self, stage, partition: Partition) -> list[tuple[str, CheckResult]]:
         ctx = build_context(self.spec, partition, self.spec.params)
+        # 检查与任务必须在同一工作目录下执行：否则 command 类型检查里的相对路径
+        # （如 --base-dir out）会解析到进程 cwd，导致"任务成功但检查莫名失败"
+        ctx["workdir"] = str(self.workdir)
         results = []
         for name in stage.checks:
             cfg = {}

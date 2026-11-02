@@ -1,0 +1,81 @@
+# 通用数据集构建管线：清洗 → 去重 → 分片 → manifest
+#
+# 这条管线不绑定任何业务领域，演示的是「原始数据 → 可交付数据集」的标准链路：
+#   seed    生成确定性样本（含重复、含坏行），本地与 CI 都能跑，不依赖外部数据
+#   clean   schema 校验 + 去重 + 文本规范化；坏样本进隔离区，带规则编号可回放
+#   shard   按 id 的 sha256 取模做确定性分片，产出 manifest（条数/校验和/分片清单）
+#
+# 为什么强调「确定性」：训练侧要求同一份输入必须切出同一份分片——断点续训、数据并行、
+# 可复现评测都依赖这一点。随机切分重跑就切不回同一份（见 app/manifest.py）。
+name: dataset-build
+description: 通用数据集构建（清洗/去重/分片/manifest），产出可直接喂给训练或推理
+
+params:
+  python: python3
+  state_db: ""              # 由 CLI 注入；空则只跑不登记
+  run_id: ""                # 由 Runner 注入，YAML 不赋值
+  app_dir: ""               # 由 Runner 注入（代码目录）
+  work_dir: "out"           # 产物根目录：本地相对路径；集群由编译器注入 /output
+  shards: "2"               # 每个分区切成几片
+
+# 集群执行目标：spec2argo 编译器读取这一段生成 Argo CRD
+k8s:
+  image: tts-argo:ci
+  image_pull_policy: Never
+  volumes:
+    output: {hostPath: {path: /tmp/ci/output, type: DirectoryOrCreate}}
+    input: {configMap: {name: etl-input-partitions}}
+  mounts: {output: /output, input: /input}
+
+# 分区 = 原始数据分片；本地/集群同一条发现命令
+partitions:
+  from: discover
+  dataset: raw_partition
+  command: |
+    if ls /input/*.jsonl >/dev/null 2>&1; then
+      ls /input/*.jsonl | xargs -n1 basename | sed 's/\.jsonl$//'
+    else
+      printf "%s\n" 1 2 3
+    fi
+
+variants: [""]              # 单变体；ETL 场景里可以是版本号/环境
+
+stages:
+  # ---------------- 1. 原始数据（可替换为真实数据源） ----------------
+  - name: seed
+    command: "{{params.python}} {{params.app_dir}}/dataset_steps.py seed --partition {{partition.key}} --out {{params.work_dir}}/raw/{{partition.key}}.jsonl --rows 20"
+    outputs: [raw]
+    artifacts:
+      raw: "{{params.work_dir}}/raw/{{partition.key}}.jsonl"
+    retry: {limit: 1}
+    timeout: 60s
+
+  # ---------------- 2. 清洗：schema + 去重 + 规范化 ----------------
+  - name: clean
+    dependencies: [seed]
+    command: "{{params.python}} {{params.app_dir}}/dataset_steps.py clean --in {{params.work_dir}}/raw/{{partition.key}}.jsonl --out {{params.work_dir}}/clean/{{partition.key}}.jsonl --quarantine {{params.work_dir}}/quarantine/{{partition.key}}.jsonl"
+    outputs: [clean]
+    consumes: [raw]
+    artifacts:
+      clean: "{{params.work_dir}}/clean/{{partition.key}}.jsonl"
+    checks: [file_nonempty, row_count]
+    check_config:
+      file_nonempty: {min_bytes: 1}
+      row_count: {min: 1}          # 全被隔离说明清洗规则或上游有问题，要失败
+    timeout: 60s
+
+  # ---------------- 3. 确定性分片 + manifest ----------------
+  - name: shard
+    dependencies: [clean]
+    command: "{{params.python}} {{params.app_dir}}/dataset_steps.py shard --in {{params.work_dir}}/clean/{{partition.key}}.jsonl --out-dir {{params.work_dir}}/shards/{{partition.key}} --shards {{params.shards}} --manifest {{params.work_dir}}/manifest/{{partition.key}}.json --dataset raw_partition --version {{params.run_id}} --base-dir {{params.work_dir}}"
+    outputs: [manifest]
+    consumes: [clean]
+    artifacts:
+      manifest: "{{params.work_dir}}/manifest/{{partition.key}}.json"
+    checks: [file_nonempty, command]
+    check_config:
+      file_nonempty: {min_bytes: 2}
+      # 独立复核：manifest 与分片必须自洽（条数合计、校验和、分片齐全）
+      command:
+        run: "{{params.python}} {{params.app_dir}}/manifest.py verify --manifest {{artifact}} --base-dir {{params.work_dir}}"
+    timeout: 120s

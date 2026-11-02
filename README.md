@@ -1,14 +1,16 @@
 # tts-pipeline-argo
 
 ![unit-tests](https://github.com/1z5/tts-pipeline-argo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：50 个离线用例，Python 3.11 + 3.12 -->
+<!-- unit-tests：54 个离线用例，Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/tts-pipeline-argo/actions/workflows/k8s-smoke.yml/badge.svg)
 
-**一条完整的数据管线案例：批量生成 → 独立回检 → 失败修复 → 对账收口，用 Argo Workflows 编排。**
+**一个声明式批量数据管线框架：定义一次，本地可跑、也能编译成 Argo CRD 上集群。**
+覆盖「清洗 → 去重 → 分片 → 模型推理接入 → 质量校验 → 交付」整条链路，
+用插件化质量闸门和 manifest 把"跑完"变成"跑对、可对账、可复现"。
 
-编排本身是框架化的（声明式 runner + 插件化质量检查），并包含常驻处理服务、对象存储抽象
-与 Prometheus 指标——覆盖任务调度、断点续跑、质量校验、状态登记到可观测告警的完整链路。
-批处理侧与常驻服务侧共享同一套可靠性语义。
+框架与业务解耦：**TTS 只是其中一个领域插件示例**（`pipelines/tts.yaml`），
+通用能力全部在框架层——声明式 runner、spec→Argo 编译器、断点续跑、确定性分片、
+隔离区、对象存储抽象、Prometheus 指标、常驻处理服务。
 
 > **边界（说清楚，不含糊）**：`spec → Argo CRD` 的编译器已落地
 > （`app/spec2argo.py`，CI 提交编译产物跑集群），但只覆盖 container 命令 +
@@ -22,6 +24,34 @@
 书籍 JSON ─► generate(按书扇出) ─► verify(ASR 回检三态判定) ─► fix(仅失败时) ─► reconcile(对账)
                                                                           │
                                                               onExit: notify(成败都收口)
+```
+
+## 三条示例管线（同一套框架，不同业务形态）
+
+| 管线 | 链路 | 演示的框架能力 |
+|---|---|---|
+| [`pipelines/dataset-build.yaml`](pipelines/dataset-build.yaml) | 原始数据 → **schema 校验 / 去重 / 规范化** → **确定性分片** → **manifest** | 清洗链路、隔离区、分片可复现、下游对账 |
+| [`pipelines/etl-demo.yaml`](pipelines/etl-demo.yaml) | 按分区扇出 → extract / transform / load → 质量闸门 | DAG 编排、动态扇出、跨 Pod 数据契约 |
+| [`pipelines/tts.yaml`](pipelines/tts.yaml) | 批量生成 → ASR 回检（三态判定）→ 仅失败时修复 → 对账 | 领域插件接入、run 级断点续跑、大模型静默截断检测 |
+
+三条管线共用同一份 `spec.py` 语义与 `runner`/`spec2argo` 两个执行目标，**只换 YAML，不换框架**。
+
+### 数据集交付：manifest + 确定性分片
+
+`app/manifest.py` 解决的是训练/推理侧的硬约束：**同一份输入必须能切出同一份分片**——
+断点续训、数据并行、可复现评测都依赖这一点，随机分片重跑就切不回同一份。
+
+- 分片规则：`shard = sha256(id) % N`（不用内置 `hash()`，它受 `PYTHONHASHSEED` 影响）
+- 每次产出附 manifest：条数、分片清单、逐片 sha256、输入指纹
+- 独立复核：`command` 检查跑 `manifest.py verify`，条数合计/校验和/分片齐全任一不符即失败
+
+```bash
+# 本地全链路（不依赖外部数据源）
+python3 app/dataset_steps.py seed  --partition 1 --out out/raw/1.jsonl
+python3 app/dataset_steps.py clean --in out/raw/1.jsonl --out out/clean/1.jsonl --quarantine out/quarantine/1.jsonl
+python3 app/dataset_steps.py shard --in out/clean/1.jsonl --out-dir out/shards/1 \
+        --shards 2 --manifest out/manifest/1.json --dataset raw_partition --version v1 --base-dir out
+python3 app/manifest.py verify --manifest out/manifest/1.json --base-dir out
 ```
 
 ## 解决什么问题
@@ -69,7 +99,7 @@ python verify_audio.py output/book_a --min-accuracy 0.90
 # 对账：expected vs actual，漏数/未过检/重复 → 非零退出码
 python summary.py --state-db state.db --books books/book_a.json --voice cedar
 
-# 测试（50 个用例，不需要 API key 与集群；CI 双 Python 版本自动跑）
+# 测试（54 个用例，不需要 API key 与集群；CI 双 Python 版本自动跑）
 cd .. && python3 tests/test_framework.py && python3 tests/test_service_and_storage.py
 
 # 本地 lint Argo YAML（离线，无需集群）
@@ -151,7 +181,7 @@ python3 runner.py ../pipelines/etl-demo.yaml --state-db state.db --workdir /tmp/
 
 ## 已验证 / 未验证
 
-**已验证（50 个离线测试 + 集群 E2E）**：
+**已验证（54 个离线测试 + 集群 E2E）**：
 - 框架 `tests/test_framework.py` 25 例：spec 解析与严格渲染校验、四类通用检查、
   runner 断点跳过/依赖阻断/重试/attempt 计数、对账按 variant 分组抓假绿、
   `spec2argo` 编译产物结构/确定性/gate/discover 输出
@@ -247,7 +277,7 @@ app/            应用代码
   tts_verify/     校验核心包
 pipelines/      声明式管线定义（tts.yaml / etl-demo.yaml）
 k8s/            Argo 编排（Workflow / CronWorkflow）
-tests/          离线测试（50 个用例：框架 / 断点续跑与状态 / 服务·存储·指标）
+tests/          离线测试（54 个用例：框架 / 断点续跑与状态 / 服务·存储·指标）
 docs/           架构、校验机制、ROADMAP（下一步计划）
 ```
 
