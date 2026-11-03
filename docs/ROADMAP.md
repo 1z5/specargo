@@ -6,7 +6,7 @@
 
 ### ✅ spec2argo 编译器（同一份 spec，两个执行目标）
 
-`app/spec2argo.py` 把 PipelineSpec 编译成 Argo CRD：
+`src/specargo/spec2argo.py` 把 PipelineSpec 编译成 Argo CRD：
 
 | PipelineSpec | Argo CRD |
 |---|---|
@@ -71,7 +71,7 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
   golden 0 漂移、三条管线编译零残留、本地 E2E（dataset 链路 + etl-demo 二次 resume）通过。
 - **代码归档**：TTS/ASR 领域实现整体移入 `examples/tts-asr/`（含 `pipelines/tts.yaml`、
   `k8s/workflow.yaml`、`cronworkflow.yaml`、`Dockerfile`、`requirements.txt`、`docs/VERIFICATION.md`、
-  领域测试）；框架层 `app/**` 不含领域字样（CI 纯净度守卫，仅 `envcompat.py` /
+  领域测试）；框架层 `src/specargo/**` 不含领域字样（CI 纯净度守卫，仅 `envcompat.py` /
   `legacy_state_migration.py` 两个兼容文件例外）。
 - **契约中性化**：环境变量 `PIPELINE_RUN_ID` / `PIPELINE_STATE_DB` / `PIPELINE_ARGO_*` /
   `PIPELINE_INPUT_DIR`（workflow 本地变量，不回退；旧 `TTS_RUN_ID` / `TTS_STATE_DB` / `TTS_ARGO_*` 由 `envcompat.py` 回退一版）；镜像 / kind 集群名

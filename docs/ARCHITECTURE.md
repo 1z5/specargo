@@ -132,7 +132,7 @@
 | `envcompat.py` | `getenv(name, legacy, default)`：新名 `PIPELINE_*` 优先、旧名 `TTS_*` 回退；旧前缀集中在此文件（一个版本后删除） |
 | `legacy_state_migration.py` | 旧状态库迁移：`tts_run` / `tts_item(book_slug, chapter_num, voice, ...)` → `pipeline_run` / `pipeline_item(dataset, partition, variant, ...)`，原地 `ALTER TABLE RENAME`，幂等（一个版本后删除） |
 
-> **框架纯净度守卫**：CI 对 `app/**` 做关键词 grep，领域字样只允许出现在
+> **框架纯净度守卫**：CI 对 `src/specargo/**` 做关键词 grep，领域字样只允许出现在
 > `envcompat.py` / `legacy_state_migration.py` 这两个兼容文件；其余模块必须保持中立。
 
 ### 2.6 通用示例与工具
@@ -188,7 +188,7 @@ load_spec(path) ──► spec.plugins = ["checks_tts"]
 
 约束：
 
-- **单向依赖**：`examples → framework`；`app/**` 不得出现领域字样（CI 有 grep 守卫），
+- **单向依赖**：`examples → framework`；`src/specargo/**` 不得出现领域字样（CI 有 grep 守卫），
   也不得反向 `import examples.*`。
 - **显式优于发现**：不做 entry_points / 自动扫描；没在 `plugins:` 里声明的模块不会加载。
 - **同一实现两侧共用**：本地 runner 的 `run_check()` 与集群 `gate-<stage>` 跑的是同一个注册表，
@@ -284,7 +284,7 @@ onExit     ─► pipeline_cli.py reconcile-journal（同一 evaluate_items 判�
 | `service.py` 的探针与停机 | liveness / readiness / startup + preStop + terminationGracePeriod |
 | `gate-<stage>` | 独立 Argo task + `retryStrategy.limit: 0` |
 
-> **已实现**：`spec2argo` 编译器（`app/spec2argo.py`，CI 提交编译产物跑集群），
+> **已实现**：`spec2argo` 编译器（`src/specargo/spec2argo.py`，CI 提交编译产物跑集群），
 > 覆盖 container 命令 + checks + artifacts + 参数 / 扇出 / 检查配置映射；
 > `k8s.journal: true` 时额外生成状态写入与 `onExit` 对账模板。
 > 未映射 script 型 template、synchronization、suspend。
