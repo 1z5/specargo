@@ -42,7 +42,7 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 | 10 | 自动生成的 objstore `--file` 未加引号（路径含空格失败）；gate 未声明 dataset/variant 输入 | 路径统一 `shlex.quote`；gate inputs/args 补齐三个维度 |
 | 11 | 文档与实际不符（死命令 / 数字 / 夸大） | README / ARCHITECTURE / ROADMAP 按实测证据校正 |
 
-新增回归：`tests/test_p0_regressions.py`；离线套件合计 **124 例**（框架 120 + 领域示例 4），全部通过。
+新增回归：`tests/test_p0_regressions.py`；离线套件合计 **129 例**（框架 125 + 领域示例 4），全部通过。
 验证方式：本地四套件 + ETL / dataset 管线 E2E + 编译产物零残留 + 独立 Argo 模拟器
 （每个 task-item 独立目录、只共享对象存储）跑通 etl-demo 与 dataset-build 的编译产物；
 真实集群侧由 CI 的 kind smoke 继续验证。
@@ -113,6 +113,8 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 - 集群 resume：`k8s.resume: true` 时每个 stage 前插 `state check-skip`
   （退出码 0=已终态跳过 / 1=需执行 / 2=用法错误）；读状态失败按未完成处理。
 - 跳过发生在 task 内部（Argo 仍拉 Pod）；要省 Pod 需 WorkflowTemplate + `when`（后续）。
+- 集群 resume 已有**真集群 CI 冒烟**：第一轮跑通 → 删除 workflow（保留对象存储状态）
+  → 同名重提 → 断言所有 stage 打印 `[resume] 已完成，跳过`。
 - Postgres / Redis 等后端在有真实多写者需求前不做。
 
 ## 进行中 / 遗留
@@ -140,10 +142,13 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 - `onExit` 仍收口
 - 告警通道收到通知
 
-### 4. WorkflowTemplate + 版本化
+### 4. WorkflowTemplate + 版本化（已完成）
 
-`k8s/workflowtemplate.yaml` + `workflowTemplateRef`，演示 DAG 改版如何灰度与回滚
-（对应"工作流版本管理与发布"）。
+- `specargo-compile --as-template` → `WorkflowTemplate`（spec 部分与 Workflow 完全一致，
+  只是 CRD 类型不同）；`--reference NAME` → 引用该模板的最小 Workflow。
+- CI 真集群验证：`kubectl apply` 模板 → 提交引用 → 断言 Succeeded 且节点由模板展开。
+- 灰度/回滚做法：模板名不变、内容更新（`kubectl apply` 新版本），新提交的 Workflow
+  自动用新版本；回滚即重新 apply 旧版本。已在 README「工作流版本化」写明。
 
 ## 已知未覆盖
 

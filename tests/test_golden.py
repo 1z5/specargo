@@ -39,6 +39,9 @@ def _compile(case: dict):
     if overrides:
         spec.k8s = dict(spec.k8s)
         spec.k8s.update(overrides)
+    if case.get("as_template"):
+        from specargo.spec2argo import compile_template
+        return compile_template(spec, name=case.get("name"))
     return compile_workflow(spec, name=case.get("name"))
 
 

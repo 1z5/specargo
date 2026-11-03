@@ -248,6 +248,118 @@ jobs:
           [ "$PARTITIONS" -ge 1 ] || { echo "❌ 缺少 partitions.json"; exit 1; }
           echo "✅ journal/onExit 冒烟通过：状态日志 + 分区清单 + onExit 对账"
 
+      # ---- 4.6 集群 resume 冒烟：真实续跑必须跳过已完成的 stage ----
+      # 做法：resume 变体跑成功（写状态）→ 删除 workflow（保留对象存储状态）
+      #      → 同名重新提交 → 断言所有 stage 都打印「[resume] 已完成，跳过」。
+      # 这是"集群断点续跑"唯一的真实验证方式：本地模拟验证不了 Pod/Argo 侧行为。
+      - name: 提交 resume 变体并验证续跑跳过（真实集群）
+        run: |
+          set -e
+          python3 - <<'PY'
+          import sys
+          import yaml
+          sys.path.insert(0, 'src')
+          from specargo.spec import load_spec
+          from specargo.spec2argo import compile_workflow
+
+          spec = load_spec('pipelines/etl-demo.yaml')
+          spec.k8s = dict(spec.k8s)
+          spec.k8s.update({'resume': True, 'journal': True, 'pod_gc_strategy': ''})
+          wf = compile_workflow(spec, name='etl-demo-resume')
+          text = yaml.safe_dump(wf, allow_unicode=True, sort_keys=False, width=120)
+          assert 'state check-skip' in text, 'resume 产物缺少 check-skip'
+          open('/tmp/compiled/etl-demo-resume.yaml', 'w', encoding='utf-8').write(text)
+          PY
+          /tmp/argo lint -n argo /tmp/compiled/etl-demo-resume.yaml
+
+          echo "=== 第一轮：正常执行并登记状态 ==="
+          /tmp/argo submit -n argo /tmp/compiled/etl-demo-resume.yaml --watch
+          PHASE1=$(/tmp/argo get -n argo etl-demo-resume -o json \
+                   | python3 -c "import sys,json;print(json.load(sys.stdin)['status']['phase'])")
+          echo "第一轮状态: $PHASE1"
+          [ "$PHASE1" = "Succeeded" ] || { echo "❌ 第一轮未成功"; exit 1; }
+
+          echo "=== 删除 workflow（保留对象存储里的状态）==="
+          /tmp/argo delete -n argo etl-demo-resume --force
+          for _ in $(seq 1 30); do
+            kubectl get workflow -n argo etl-demo-resume >/dev/null 2>&1 || break
+            sleep 2
+          done
+          kubectl get workflow -n argo etl-demo-resume >/dev/null 2>&1 \
+            && { echo "❌ 旧 workflow 未能删除，无法同名重提"; exit 1; }
+
+          echo "=== 第二轮：同名重提，应全部跳过 ==="
+          /tmp/argo submit -n argo /tmp/compiled/etl-demo-resume.yaml --watch
+          PHASE2=$(/tmp/argo get -n argo etl-demo-resume -o json \
+                   | python3 -c "import sys,json;print(json.load(sys.stdin)['status']['phase'])")
+          echo "第二轮状态: $PHASE2"
+          [ "$PHASE2" = "Succeeded" ] || { echo "❌ 第二轮未成功（resume 判定或跳过逻辑有问题）"; exit 1; }
+
+          # 所有 stage Pod 的日志里都必须有 resume 跳过标记（stage×分区 数量对得上）
+          SKIPPED=$(kubectl get pods -n argo \
+                    -l workflows.argoproj.io/workflow=etl-demo-resume \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+                    | grep -E 'etl-demo-resume-(extract|transform|load)-' \
+                    | while read -r pod; do
+                        kubectl logs -n argo "$pod" 2>/dev/null | grep -c '\[resume\] .* 已完成，跳过' || true
+                      done | awk '{s+=$1} END {print s+0}')
+          PARTS=$(/tmp/argo get -n argo etl-demo-resume -o json | python3 -c "
+          import sys, json
+          wf = json.load(sys.stdin)
+          n = [x for x in wf['status']['nodes'].values()
+               if x.get('templateName') == 'extract' and x.get('type') == 'Pod']
+          print(len(n))
+          ")
+          EXPECT_SKIP=$((3 * PARTS))
+          echo "检测到 resume 跳过次数: $SKIPPED（期望 $EXPECT_SKIP = 3 stage × $PARTS 分区）"
+          [ "$SKIPPED" -ge "$EXPECT_SKIP" ] || { echo "❌ 续跑没有跳过已完成的 stage"; exit 1; }
+
+          echo "✅ 集群 resume 冒烟通过：第二轮全部跳过已完成的 stage"
+
+      # ---- 4.7 WorkflowTemplate 冒烟：注册模板 → 提交引用 → 跑通 ----
+      # 验证"工作流版本管理与发布"的最小闭环：同一份 spec 发布成模板，
+      # 多份 Workflow 只引用模板（升级/回滚只改模板，不改提交侧）。
+      - name: 发布 WorkflowTemplate 并提交引用它的 Workflow
+        run: |
+          set -e
+          specargo-compile pipelines/etl-demo.yaml --as-template \
+            -o /tmp/compiled/etl-demo-template.yaml
+          python3 -c "
+          import yaml
+          d = yaml.safe_load(open('/tmp/compiled/etl-demo-template.yaml', encoding='utf-8'))
+          assert d['kind'] == 'WorkflowTemplate', d['kind']
+          print('模板:', d['metadata']['name'], '| templates:', len(d['spec']['templates']))
+          "
+          kubectl apply -f /tmp/compiled/etl-demo-template.yaml
+
+          specargo-compile pipelines/etl-demo.yaml --as-template \
+            --reference etl-via-template -o /tmp/compiled/etl-via-template.yaml
+          python3 -c "
+          import yaml
+          d = yaml.safe_load(open('/tmp/compiled/etl-via-template.yaml', encoding='utf-8'))
+          ref = d['spec']['workflowTemplateRef']
+          print('引用模板:', ref['name'])
+          assert d['spec'].get('workflowTemplateRef'), '引用 Workflow 缺少 workflowTemplateRef'
+          "
+          /tmp/argo lint -n argo /tmp/compiled/etl-via-template.yaml
+          /tmp/argo submit -n argo /tmp/compiled/etl-via-template.yaml --watch
+
+          PHASE=$(/tmp/argo get -n argo etl-via-template -o json \
+                  | python3 -c "import sys,json;print(json.load(sys.stdin)['status']['phase'])")
+          echo "模板引用 Workflow 状态: $PHASE"
+          [ "$PHASE" = "Succeeded" ] || { echo "❌ 引用模板的 Workflow 未成功"; exit 1; }
+
+          # 节点必须由模板展开（templateName 来自 WorkflowTemplate）
+          NODES=$(/tmp/argo get -n argo etl-via-template -o json | python3 -c "
+          import sys, json
+          wf = json.load(sys.stdin)
+          pods = [n for n in wf['status']['nodes'].values() if n.get('type') == 'Pod']
+          print(len(pods))
+          ")
+          echo "模板展开的 Pod 节点数: $NODES"
+          [ "$NODES" -ge 10 ] || { echo "❌ 模板没有展开出预期节点数"; exit 1; }
+          echo "✅ WorkflowTemplate 冒烟通过：注册 → 引用 → 执行"
+
       # ---- 5. 收集证据（无论成败）----
       - name: 收集运行证据
         if: always()

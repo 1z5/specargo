@@ -1,7 +1,7 @@
 # specargo
 
 ![unit-tests](https://github.com/1z5/specargo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：124 个离线用例（框架 120 + 领域示例 4），Python 3.11 + 3.12 -->
+<!-- unit-tests：129 个离线用例（框架 125 + 领域示例 4），Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/specargo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一个声明式批量数据管线框架：定义一次，本地可跑，也能编译成 Argo CRD 上集群。**
@@ -88,6 +88,7 @@ YAML spec ─► spec.py 解析/校验 ─► runner.py 本地执行 ─► chec
 | **容器与编排** | 根目录 `Dockerfile`（pip install specargo + moto S3）+ `k8s/object-store.yaml` / `artifact-repository.yaml`；CI 在 kind + Argo Workflows v3.7.18 上实测跑通（见「已验证」）。`k8s/workflow-etl-smoke.yaml` 是历史手写对照 |
 | **运行时配置** | `RuntimeConfig`（`runtime.py`）：镜像 / 命名空间 / SA / 挂载 / 对象存储 / deadline / podGC 集中一处；优先级：内置默认 < spec `runtime:` 节（旧名 `k8s:` 仍兼容）< CLI `--runtime runtime.yaml`（按 key 覆盖，一份 spec 多环境） |
 | **编译器回归** | golden 编译产物（`tests/golden/` + `tests/test_golden.py`）：编译器行为变更必须显式 `python3 tests/update_golden.py` 更新 golden，否则以 drift 失败——防"顺手改坏编译器" |
+| **模板与版本化** | `specargo-compile --as-template` 把同一份 spec 发布成 WorkflowTemplate，`--reference` 生成引用它的最小 Workflow；升级/回滚只改模板，提交侧不变（CI 真集群验证：注册 → 引用 → 执行） |
 | **成本与效率** | 并发与重试参数化、输入指纹避免重复计算、`--force` 受控重处理、stage 级 requests/limits 编译进 container；`nodeSelector`/`tolerations` 编译器尚未映射 |
 
 ## 快速开始
@@ -123,7 +124,7 @@ YAML
 specargo-compile pipelines/etl-demo.yaml --runtime /tmp/compiled/runtime.yaml \
   -o /tmp/compiled/etl-demo-prod.yaml
 
-# 4) 离线测试：124 例（框架 120 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
+# 4) 离线测试：129 例（框架 125 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
 for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 
 # 5) 集群冒烟（CI 自动跑；也可手动触发）
@@ -189,7 +190,7 @@ k8s:
 
 ## 已验证 / 未验证
 
-**已验证（124 个离线用例 = 框架 120 + 领域示例 4，+ 集群 E2E）**：
+**已验证（129 个离线用例 = 框架 125 + 领域示例 4，+ 集群 E2E）**：
 
 - 框架 `tests/test_framework.py`（32 例）：spec 解析与严格校验、四类通用检查、runner 断点跳过 /
   依赖阻断 / 重试 / attempt 计数、对账按 variant 分组抓假绿、`spec2argo` 编译产物结构 /
@@ -277,6 +278,19 @@ PASS/FAIL 传播全部实测通过（bucket 总计 46 个对象 = 15 产物 + 15
 artifacts 的对象存储路径契约（上游 put、下游 get，key 一致），
 以及 `{{workflow.parameters.*}}` 参数注入。开启 `k8s.journal` 时额外生成
 `onExit` 模板（状态日志对账）与状态写入步骤，见上文「集群侧语义」。
+
+### 工作流版本化：WorkflowTemplate
+
+```bash
+# 发布/更新模板（升级或回滚都只动这一步）
+specargo-compile pipelines/etl-demo.yaml --as-template -o /tmp/etl-demo-template.yaml
+kubectl apply -f /tmp/etl-demo-template.yaml
+
+# 提交一个引用模板的最小 Workflow（多份实例共用同一模板）
+specargo-compile pipelines/etl-demo.yaml --as-template \
+  --reference etl-via-template -o /tmp/etl-via-template.yaml
+argo submit -n argo /tmp/etl-via-template.yaml
+```
 
 ```bash
 # 本地编译 + lint（无需集群，argo CLI 需自行安装）
@@ -393,7 +407,7 @@ examples/tts-asr/         领域插件示例（TTS 生成 + ASR 回检 + 对账�
 pipelines/                通用管线定义（dataset-build.yaml / etl-demo.yaml）
 k8s/                      CI 基础设施（object-store / artifact-repository / 历史 smoke）
 docs/                     架构（ARCHITECTURE.md）与计划（ROADMAP.md）
-tests/                    离线测试（框架 120 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
+tests/                    离线测试（框架 125 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
 Dockerfile                通用 CI 镜像（pip install specargo + moto S3）
 ```
 

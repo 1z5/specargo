@@ -41,5 +41,12 @@
       "journal": true
     },
     "name": "etl-demo-resume"
+  },
+  {
+    "spec": "pipelines/etl-demo.yaml",
+    "golden": "etl-demo-template.yaml",
+    "overrides": {},
+    "name": null,
+    "as_template": true
   }
 ]

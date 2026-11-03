@@ -658,6 +658,40 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
 # CLI
 # ---------------------------------------------------------------------------
 
+def compile_template(spec: PipelineSpec, *, name: str | None = None,
+                     namespace: str | None = None,
+                     runtime: RuntimeConfig | None = None) -> dict:
+    """编译成 ``WorkflowTemplate``（可注册到集群、被多个 Workflow 引用）。
+
+    与 ``compile_workflow`` 的唯一差别是 CRD 类型与 metadata：
+    ``spec.templates`` / ``spec.entrypoint`` / ``spec.arguments`` 完全相同——
+    同一份 spec 既能直接提交 Workflow，也能发布成版本化模板（灰度/回滚）。
+    """
+    wf = compile_workflow(spec, name=name, namespace=namespace, runtime=runtime)
+    return {
+        "apiVersion": wf["apiVersion"],
+        "kind": "WorkflowTemplate",
+        "metadata": dict(wf["metadata"]),
+        "spec": wf["spec"],
+    }
+
+
+def render_reference(template: dict, *, name: str, arguments: dict | None = None,
+                     namespace: str | None = None) -> dict:
+    """生成一个引用该 WorkflowTemplate 的最小 Workflow（用于"发布模板后怎么跑"）。"""
+    spec: dict = {"workflowTemplateRef": {"name": template["metadata"]["name"]}}
+    if arguments:
+        spec["arguments"] = {"parameters": [
+            {"name": k, "value": str(v)} for k, v in arguments.items()]}
+    return {
+        "apiVersion": template["apiVersion"],
+        "kind": "Workflow",
+        "metadata": {"name": name,
+                     "namespace": namespace or template["metadata"].get("namespace", "argo")},
+        "spec": spec,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="把管线定义编译成 Argo Workflow")
     parser.add_argument("spec", help="pipelines/*.yaml")
@@ -666,6 +700,10 @@ def main() -> int:
     parser.add_argument("--namespace", default=None,
                         help="命名空间（缺省用 runtime.namespace）")
     parser.add_argument("--runtime", help="运行时配置 YAML（按 key 覆盖 spec 的 runtime/k8s 节）")
+    parser.add_argument("--as-template", action="store_true",
+                        help="编译成 WorkflowTemplate（可注册到集群、被多个 Workflow 引用）")
+    parser.add_argument("--reference", metavar="NAME",
+                        help="生成引用该模板的最小 Workflow（与 --as-template 配合使用）")
     args = parser.parse_args()
 
     spec = load_spec(args.spec)
@@ -674,8 +712,17 @@ def main() -> int:
         runtime.apply_mapping(
             yaml.safe_load(Path(args.runtime).read_text(encoding="utf-8")) or {},
             where=args.runtime)
-    wf = compile_workflow(spec, name=args.name, namespace=args.namespace,
-                          runtime=runtime)
+    if args.reference:
+        template = compile_template(spec, name=args.name, namespace=args.namespace,
+                                    runtime=runtime)
+        wf = render_reference(template, name=args.reference,
+                              namespace=args.namespace)
+    elif args.as_template:
+        wf = compile_template(spec, name=args.name, namespace=args.namespace,
+                             runtime=runtime)
+    else:
+        wf = compile_workflow(spec, name=args.name, namespace=args.namespace,
+                              runtime=runtime)
     text = yaml.safe_dump(wf, allow_unicode=True, sort_keys=False, width=120)
 
     header = ("# 由 spec2argo 从 %s 自动生成，请勿手改\n"
@@ -684,7 +731,8 @@ def main() -> int:
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output).write_text(header + text, encoding="utf-8")
-        print(f"✅ 已生成 {args.output}（{len(wf['spec']['templates'])} 个 template）",
+        print(f"✅ 已生成 {args.output}（{wf['kind']}，"
+              f"{len(wf['spec'].get('templates', []))} 个 template）",
               file=sys.stderr)
     else:
         print(header + text)
