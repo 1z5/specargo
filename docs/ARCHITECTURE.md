@@ -91,7 +91,7 @@
 
 | 模块 | 职责 | 维护注意 |
 |---|---|---|
-| `spec.py` | YAML → `PipelineSpec`（Stage / Partition / RetryPolicy）；模板渲染；**严格校验** | 未知字段 / 依赖成环 / 类型错误 / `when` 未支持等在加载期抛 `SpecError`；渲染默认严格模式 |
+| `spec.py` | YAML → `PipelineSpec`（Stage / Partition / RetryPolicy）；模板渲染；**严格校验**；**契约版本**（`version`，缺省=当前；`_MIGRATIONS` N→N+1 自动迁移并告警） | 未知字段 / 依赖成环 / 类型错误 / 高版本 spec 等在加载期抛 `SpecError`；渲染默认严格模式；版本校验先于字段校验 |
 | `runner.py` | 本地 stage 执行器：依赖拓扑排序与阻断级联、断点续跑、重试、超时、质量闸门、对账收口 | 近似"单机版 workflow-controller"；`--workdir` 自动创建；终态语义见 §5.1 |
 | `spec2argo.py` | 编译器：`PipelineSpec` → Argo Workflow CRD | 覆盖 container 命令 + checks + artifacts + 参数 / 扇出 / 检查配置；对产物做"零残留模板变量"自检 |
 

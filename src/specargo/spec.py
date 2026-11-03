@@ -36,10 +36,41 @@ YAML 形态::
 from __future__ import annotations
 
 import re
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import yaml
+
+
+# ---------------------------------------------------------------------------
+# spec 契约版本与兼容策略
+# ---------------------------------------------------------------------------
+# 一条 spec 是给别人写的"契约"，所以它必须能回答一个问题：这份文件按哪一版规则解析？
+# 没有版本号的契约只能靠"拒绝所有未知字段"硬着陆——改一个字段就全军覆没。
+#
+# 什么时候**要**升 SPEC_VERSION_CURRENT（必须同时补一条 _MIGRATIONS[N]，否则加载直接失败）：
+#   - 语义变更：同一种写法含义变了（例：resume 的跳过条件收紧）
+#   - 必填化：原来可选、现在必须写
+#   - 拒绝旧写法：旧字段从"接受"变成"报错"
+# 什么时候**不**升：
+#   - 新增可选字段（旧 spec 照样能跑，属于 minor）
+#   - 只加严格校验、但旧的合法写法仍然合法（同上）
+#
+# 兼容承诺（由代码强制，不是口头承诺）：只要 _MIGRATIONS 里留着 N -> N+1，
+# 版本 N 的 spec 就能自动迁到当前版本并**告警**运行；删掉某条迁移 = 单方面宣布
+# 该版本不再兼容，这是一次 breaking change，必须写进 CHANGELOG 并升主版本。
+SPEC_VERSION_CURRENT = 1
+
+# 迁移链：键是"旧版本号"，值把版本 N 的 raw dict 变成版本 N+1 的 raw dict
+# （返回新 dict，不修改入参）。能自动修的形态差异写在这里；修不了、需要人决策的
+# 改动（例如"该字段现在必须显式声明"）不要硬猜，直接留空让加载报错并提示怎么改。
+_MIGRATIONS: dict[int, Callable[[dict], dict]] = {}
+
+# 常见误写：用户以为是 spec_version / schema_version。与其让他们面对
+# "未知字段"这种误导性报错，不如直接告诉正确字段名。
+_VERSION_ALIASES = ("spec_version", "schema_version", "apiVersion", "api_version")
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +148,8 @@ class Partition:
 class PipelineSpec:
     name: str
     stages: list[Stage]
+    # spec 契约版本（加载时归一化为 SPEC_VERSION_CURRENT；见文件头「spec 契约版本」）
+    version: int = SPEC_VERSION_CURRENT
     partitions: list[Partition] = field(default_factory=list)
     description: str = ""
     # 批次级参数（可被 CLI / Argo arguments 覆盖）
@@ -141,7 +174,7 @@ class PipelineSpec:
 _VAR = re.compile(r"\{\{\s*([a-zA-Z_][\w.]*)\s*\}\}")
 
 # 允许的字段集合：拼错/写错键必须报错，不能静默丢弃（静默丢弃会让整条管线"假绿"）。
-_ALLOWED_TOP = {"name", "description", "params", "partitions", "variants",
+_ALLOWED_TOP = {"version", "name", "description", "params", "partitions", "variants",
                 "stages", "k8s", "runtime", "plugins"}
 _ALLOWED_STAGE = {
     "name", "command", "inputs", "outputs", "dependencies", "retry", "timeout",
@@ -170,6 +203,15 @@ _DISCOVER_TIMEOUT_SECONDS = 60
 
 class SpecError(ValueError):
     """管线定义或渲染错误（未知变量、缺参数、结构非法等）。"""
+
+
+class SpecDeprecationWarning(UserWarning):
+    """spec 用了过时的写法（当前靠迁移链兜底，但应该更新）。
+
+    继承 ``UserWarning`` 而不是 ``DeprecationWarning``：后者在非 ``__main__`` 场景默认被
+    过滤，等于"静默容忍"——而 spec 是用户手写的，写的人必须看得见。用户可以按类别
+    ``warnings.filterwarnings("ignore", category=SpecDeprecationWarning)`` 自行关掉。
+    """
 
 
 def render(template: str, context: dict, *, strict: bool = True) -> str:
@@ -237,6 +279,67 @@ def _reject_unknown_keys(d: dict, allowed: set[str], where: str) -> None:
             f"{where}: 未知字段 {unknown}（支持: {sorted(allowed)}）。"
             f"拼写错误不会被静默忽略。"
         )
+
+
+def _check_version_aliases(raw: dict, where: str) -> None:
+    """把"写错名字的版本字段"变成可执行的提示，而不是"未知字段"。
+
+    场景很具体：用户想标注 spec 版本，凭直觉写成 ``spec_version`` / ``schema_version``，
+    然后被 ``_reject_unknown_keys`` 拦下，报错只说"未知字段"，于是他改成别的键名继续猜。
+    """
+    for alias in _VERSION_ALIASES:
+        if alias in raw:
+            raise SpecError(
+                f"{where}: 顶层字段 {alias!r} 不受支持；spec 版本字段名是 version"
+                f"（当前契约版本 {SPEC_VERSION_CURRENT}），如 ``version: {SPEC_VERSION_CURRENT}``。"
+            )
+
+
+def _spec_version(raw: dict, where: str) -> int:
+    """读出并校验 spec 版本；缺省视为当前版本（老 spec 不必回填 version）。"""
+    if "version" not in raw:
+        return SPEC_VERSION_CURRENT
+    value = raw["version"]
+    # bool 是 int 的子类：``version: true`` 会被 isinstance(x, int) 放行成 1，必须显式拒绝。
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise SpecError(
+            f"{where}: version 必须是正整数（当前契约版本 {SPEC_VERSION_CURRENT}），"
+            f"实际是 {value!r}。"
+        )
+    if value > SPEC_VERSION_CURRENT:
+        raise SpecError(
+            f"{where}: spec 版本 {value} 高于本框架支持的 {SPEC_VERSION_CURRENT}——"
+            f"升级 specargo（pip install -U specargo），或把 version 改回 {SPEC_VERSION_CURRENT}。"
+        )
+    return value
+
+
+def _migrate_spec(raw: dict, from_version: int, where: str) -> dict:
+    """把旧版本 spec 逐级迁移到当前版本；缺迁移实现时明确报错而不是猜。"""
+    if from_version == SPEC_VERSION_CURRENT:
+        return raw
+    data = dict(raw)
+    version = from_version
+    steps: list[str] = []
+    while version < SPEC_VERSION_CURRENT:
+        migrate = _MIGRATIONS.get(version)
+        if migrate is None:
+            raise SpecError(
+                f"{where}: 无法把 spec 从版本 {version} 迁移到 {version + 1}"
+                f"（缺少迁移实现）；请按版本 {version + 1} 的写法手工更新该文件。"
+            )
+        data = migrate(data)
+        steps.append(f"{version}->{version + 1}")
+        version += 1
+    data["version"] = SPEC_VERSION_CURRENT
+    # 用 SpecDeprecationWarning（UserWarning 子类）：默认可见，不让旧写法静默通过。
+    warnings.warn(
+        f"{where}: spec 版本 {from_version} 已过时（当前 {SPEC_VERSION_CURRENT}），"
+        f"已自动迁移 {', '.join(steps)}；请把 version 与写法更新到最新。",
+        SpecDeprecationWarning,
+        stacklevel=3,
+    )
+    return data
 
 
 def validate_spec(spec: PipelineSpec, *, path: str | Path = "") -> None:
@@ -454,6 +557,14 @@ def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
         raise SpecError(f"{path}: 空文件（没有任何管线定义）")
     if not isinstance(raw, dict):
         raise SpecError(f"{path}: 顶层必须是 YAML 映射，实际是 {type(raw).__name__}")
+    # 版本必须在字段校验**之前**处理：高版本 spec 的新字段要先由迁移链搬到当前形态，
+    # 否则用户看到的是"未知字段"这种误导性报错，而不是"该升级 specargo"。
+    _check_version_aliases(raw, str(path))
+    version = _spec_version(raw, str(path))
+    raw = _migrate_spec(raw, version, str(path))
+    # 迁移后一律归一到当前版本：PipelineSpec.version 描述的是"按哪版规则解析成功"，
+    # 不是文件里写的那个数字（否则编译产物注解会标成旧版本）。
+    version = SPEC_VERSION_CURRENT
     _reject_unknown_keys(raw, _ALLOWED_TOP, str(path))
 
     raw_partitions = raw.get("partitions") or {}
@@ -623,6 +734,7 @@ def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
     spec = PipelineSpec(
         name=name,
         stages=stages,
+        version=version,
         partitions=partitions,
         description=description,
         params=params,

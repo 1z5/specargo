@@ -7,6 +7,7 @@
 #
 # 为什么强调「确定性」：训练侧要求同一份输入必须切出同一份分片——断点续训、数据并行、
 # 可复现评测都依赖这一点。随机切分重跑就切不回同一份（见 app/manifest.py）。
+version: 1
 name: dataset-build
 description: 通用数据集构建（清洗/去重/分片/manifest），产出可直接喂给训练或推理
 

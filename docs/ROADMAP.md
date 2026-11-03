@@ -43,7 +43,7 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 | 10 | 自动生成的 objstore `--file` 未加引号（路径含空格失败）；gate 未声明 dataset/variant 输入 | 路径统一 `shlex.quote`；gate inputs/args 补齐三个维度 |
 | 11 | 文档与实际不符（死命令 / 数字 / 夸大） | README / ARCHITECTURE / ROADMAP 按实测证据校正 |
 
-新增回归：`tests/test_p0_regressions.py`；离线套件合计 **135 例**（框架 131 + 领域示例 4），全部通过。
+新增回归：`tests/test_p0_regressions.py`；离线套件合计 **145 例**（框架 141 + 领域示例 4），全部通过。
 验证方式：本地四套件 + ETL / dataset 管线 E2E + 编译产物零残留 + 独立 Argo 模拟器
 （每个 task-item 独立目录、只共享对象存储）跑通 etl-demo 与 dataset-build 的编译产物；
 真实集群侧由 CI 的 kind smoke 继续验证。
@@ -68,7 +68,7 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
   README 标题、badge、`gh workflow run -R`、本地 remote、仓库描述 / topics 已同步。
 - **本地工作副本改名**：`/Users/zephyr/dev/tts-argo` → `/Users/zephyr/dev/specargo`（与 GitHub 同名）。
   editable 安装的 `.pth` / `direct_url.json` 原本指向旧路径，改名后重跑 `pip install -e .` 刷新；
-  验证：`import specargo` 解析到新路径、五个 console script 正常、离线 135 例全绿、
+  验证：`import specargo` 解析到新路径、五个 console script 正常、离线 145 例全绿、
   golden 0 漂移、三条管线编译零残留、本地 E2E（dataset 链路 + etl-demo 二次 resume）通过。
 - **代码归档**：TTS/ASR 领域实现整体移入 `examples/tts-asr/`（含 `pipelines/tts.yaml`、
   `k8s/workflow.yaml`、`cronworkflow.yaml`、`Dockerfile`、`requirements.txt`、`docs/VERIFICATION.md`、
@@ -108,6 +108,25 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
   （不再 COPY 源文件、不再依赖 `/app/*.py`）。
 - `subprocess_env.child_env()` 让本地跑 demo 也不需要手动设 `PYTHONPATH`。
 - 测试与 examples 通过 bootstrap 兜底：已安装用包，未安装退回 `src/`。
+
+### 2.5 spec 契约版本与兼容策略（已完成）
+
+spec 不只是配置，它是**给别人写的契约**：没有版本号时，"加一个字段"就等于"所有旧文件一起报错"，
+而报错只会说"未知字段"，使用者只能猜。
+
+- 顶层新增可选 `version`（缺省 = 当前版本，老 spec 不用回填、不告警）。
+- `SPEC_VERSION_CURRENT` 只在这三种情况下升：语义变更 / 字段必填化 / 拒绝旧写法；
+  新增可选字段与只加严格校验**不升**（属于 minor）。
+- 兼容由代码强制：`_MIGRATIONS`（N -> N+1）在则自动迁移并告警（`SpecDeprecationWarning`
+  继承 `UserWarning`，默认可见——不让旧写法静默通过）；缺迁移实现则明确报错、不猜。
+- 版本校验在字段校验**之前**：高版本 spec 的新字段要先被迁移链搬到当前形态，
+  否则用户看到的是"未知字段"而不是"该升级 specargo"。
+- 常见误写（`spec_version` / `schema_version` / `apiVersion`）直接给正确字段名。
+- 版本随产物走：编译出的 Workflow / WorkflowTemplate 带注解 `specargo.dev/spec-version`。
+- 回归：`tests/test_spec_version.py`（10 例）——含"模拟框架升级到 v2/v3"的迁移链测试
+  与"告警默认可见"的断言（不能出现"加了告警但用户看不到"的假象）。
+
+遗留：v1 是第一版，`_MIGRATIONS` 目前为空；等真正引入 v2 时按同一模式补一条迁移即可。
 
 ### 3. `StateStore` 协议 + 集群 resume（已完成）
 

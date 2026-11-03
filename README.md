@@ -1,7 +1,7 @@
 # specargo
 
 ![unit-tests](https://github.com/1z5/specargo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：135 个离线用例（框架 131 + 领域示例 4），Python 3.11 + 3.12 -->
+<!-- unit-tests：145 个离线用例（框架 141 + 领域示例 4），Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/specargo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一个声明式批量数据管线框架：定义一次，本地可跑，也能编译成 Argo CRD 上集群。**
@@ -124,7 +124,7 @@ YAML
 specargo-compile pipelines/etl-demo.yaml --runtime /tmp/compiled/runtime.yaml \
   -o /tmp/compiled/etl-demo-prod.yaml
 
-# 4) 离线测试：135 例（框架 131 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
+# 4) 离线测试：145 例（框架 141 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
 for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 
 # 5) 集群冒烟（CI 自动跑；也可手动触发）
@@ -159,6 +159,42 @@ spec 的 `k8s.plugin_path` 指定；加载失败时 gate 启动即报错。示�
 name: tts-example
 plugins: ["checks_tts"]      # 加载 examples/tts-asr/checks_tts.py，注册 asr_three_state 检查
 ```
+
+## spec 版本与兼容策略
+
+spec 是**给别人写的契约**，所以它自己带版本号——不然"加一个字段"就等于"所有旧文件一起报错"。
+
+```yaml
+version: 1            # 可选：不写就是当前版本；写错 / 写高都会在加载期报错
+```
+
+**升契约版本（`SPEC_VERSION_CURRENT`）的三种情况**（必须同时补一条迁移实现，否则加载直接失败）：
+
+- 语义变更：同一种写法的含义变了（例：resume 的跳过条件收紧）；
+- 必填化：原来可选、现在必须写；
+- 拒绝旧写法：旧字段从"接受"变成"报错"。
+
+**不升版本**：新增可选字段、只加严格校验（旧的合法写法仍然合法）。
+
+**兼容承诺由代码强制，不是口头承诺**：`specargo/spec.py` 的 `_MIGRATIONS` 里留着 `N -> N+1`，
+版本 `N` 的 spec 就能在加载时自动迁移并**可见地**告警（`SpecDeprecationWarning` 继承
+`UserWarning`，默认不被过滤——spec 是人手写的，写的人必须看得见）；删掉某条迁移 =
+单方面宣布该版本不再兼容，那是一次 breaking change，要写进 CHANGELOG 并升主版本。
+
+三档报错各司其职，都指向"下一步该做什么"：
+
+| 写法 | 结果 |
+|---|---|
+| 不写 `version` | 按当前版本加载，**不告警**（升级框架不该吵醒所有老用户） |
+| `version: 1`（当前版本） | 正常加载 |
+| `version: 2`（高于框架支持） | `SpecError: spec 版本 2 高于本框架支持的 1——升级 specargo（pip install -U specargo），或把 version 改回 1` |
+| `spec_version: 1` / `apiVersion: 1`（常见误写） | `SpecError: 顶层字段 'spec_version' 不受支持；spec 版本字段名是 version…`（不是含糊的"未知字段"） |
+| 旧版本 + 有迁移实现 | 自动迁移 + 告警 `spec 版本 1 已过时（当前 2），已自动迁移 1->2；请把 version 与写法更新到最新` |
+| 旧版本 + 缺迁移实现 | `SpecError: 无法把 spec 从版本 1 迁移到 2（缺少迁移实现）；请按版本 2 的写法手工更新` |
+
+版本也**跟着产物走**：编译出的 Workflow / WorkflowTemplate 带注解
+`specargo.dev/spec-version: "1"`——线上跑着的工作流能回答"它按哪版契约编译"，
+排查"本地能跑、集群行为不同"时，第一手信息就是这里。
 
 ## 集群侧语义（可选开启）
 
@@ -197,7 +233,7 @@ k8s:
 > 一份式的项目状态快照（已验证 / 未验证 / 已知边界 / 下一步）见 [`docs/STATUS.md`](docs/STATUS.md)，
 > 本章是它的展开版。
 
-**已验证（135 个离线用例 = 框架 131 + 领域示例 4，+ 集群 E2E）**：
+**已验证（145 个离线用例 = 框架 141 + 领域示例 4，+ 集群 E2E）**：
 
 - 框架 `tests/test_framework.py`（32 例）：spec 解析与严格校验、四类通用检查、runner 断点跳过 /
   依赖阻断 / 重试 / attempt 计数、对账按 variant 分组抓假绿、`spec2argo` 编译产物结构 /
@@ -225,6 +261,9 @@ k8s:
 - 规模压测（`tests/test_scale.py` 6 例）：1000 分区 × 3 stage = 3000 状态对象，
   对账 **1000 次 GET / 0.18s / 对账 0ms / LIST 0 次**；直读与全量读结论逐条一致；
   漏数与未过检分类不退化；`check-skip` 单点读 O(1)
+- spec 版本与兼容（`tests/test_spec_version.py` 10 例）：缺省不告警、高版本报"升级 specargo"、
+  误写成 `spec_version` 给正确字段名提示、迁移链按序执行并可自动迁移（告警默认可见）、
+  缺迁移实现明确报错、编译产物带 `specargo.dev/spec-version` 注解
 - golden 编译产物（`tests/test_golden.py` 4 例）：编译器 drift 直接失败
 - CI：`unit-tests` 在 Python 3.11 / 3.12 上跑全部离线套件 + 框架纯净度守卫；
   `k8s-smoke` 在 kind 多节点 + Argo Workflows v3.7.18 上提交 `spec2argo` 编译产物，
@@ -417,7 +456,7 @@ examples/tts-asr/         领域插件示例（TTS 生成 + ASR 回检 + 对账�
 pipelines/                通用管线定义（dataset-build.yaml / etl-demo.yaml）
 k8s/                      CI 基础设施（object-store / artifact-repository / 历史 smoke）
 docs/                     架构（ARCHITECTURE.md）与计划（ROADMAP.md）
-tests/                    离线测试（框架 131 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
+tests/                    离线测试（框架 141 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
 Dockerfile                通用 CI 镜像（pip install specargo + moto S3）
 ```
 

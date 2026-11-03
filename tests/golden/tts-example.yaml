@@ -7,6 +7,8 @@ kind: Workflow
 metadata:
   name: tts-example
   namespace: argo
+  annotations:
+    specargo.dev/spec-version: '1'
 spec:
   entrypoint: main
   activeDeadlineSeconds: 1800

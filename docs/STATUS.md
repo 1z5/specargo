@@ -13,13 +13,13 @@
 ## 1. 一句话结论
 
 框架层（spec 解析 → 本地 runner / Argo 编译器 → 质量闸门 → 状态登记 → 对账）功能闭环，
-**135 个离线用例 + 本地 E2E + kind 真实集群 E2E 三侧都有实测证据**；
+**145 个离线用例 + 本地 E2E + kind 真实集群 E2E 三侧都有实测证据**；
 剩下的缺口集中在"生产级环境的非功能性验证"（真对象存储吞吐、千级 Pod、多副本 HA）
 和三个未映射的 Argo 特性（集群 skip、script template、synchronization/suspend）。
 
 ## 2. 已验证
 
-### 2.1 离线套件：135 例全绿（框架 131 + 领域示例 4）
+### 2.1 离线套件：145 例全绿（框架 141 + 领域示例 4）
 
 | 套件 | 例数 | 覆盖要点 |
 |---|---|---|
@@ -31,6 +31,7 @@
 | `tests/test_resume_state.py` | 8 | 指纹跳过与输入变化、输出缺失重生成、item 状态幂等 upsert、对账漏数 / 未过检、旧库 schema 自动迁移 |
 | `tests/test_state_store.py` | 9 | `StateStore` 协议下两个实现的 item / run 读写语义一致 |
 | `tests/test_scale.py` | 6 | 千级分区规模与耗时上界、直读 == 全量读、GET 次数硬断言、check-skip O(1) |
+| `tests/test_spec_version.py` | 10 | spec 契约版本：缺省不告警、高版本报"升级 specargo"、误写字段名给正确提示、迁移链按序执行且告警默认可见、缺迁移实现明确报错、编译产物带 `specargo.dev/spec-version` 注解 |
 | `tests/test_golden.py` | 4 | golden 编译产物 drift 检测（5 份 golden：普通 / journal / podGC-off / 领域插件 / etl） |
 | `tests/test_template.py` | 5 | `--as-template` / `--reference` 编译形态与引用最小 Workflow |
 | `examples/tts-asr/tests/test_tts_state.py` | 4 | 书籍口径 ↔ 通用状态表映射、领域对账、重复产物检测（不装 openai / faster-whisper） |
@@ -46,6 +47,8 @@ for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 - `python3 tests/update_golden.py --diff` → **0 个 golden 变更**（编译器行为无 drift）。
 - 三条管线 `specargo-compile` 成功，且产物**零残留模板变量**（`{{params.` / `{{partition.` / `{{artifact}}` 均无）。
 - 框架纯净度守卫：`src/` 内无领域词泄漏（CI 同一条 grep，仅 `envcompat.py` / `legacy_state_migration.py` 例外）。
+- spec 契约版本：加载期强制（缺省=当前版本、高版本拒绝、旧版本走迁移链并可见告警），
+  编译产物带 `specargo.dev/spec-version` 注解——版本信息活到线上，而不只停在文档里。
 
 ### 2.3 本地 E2E（从 `pip install -e .` 后的新路径实测）
 

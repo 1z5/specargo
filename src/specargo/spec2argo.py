@@ -647,7 +647,13 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
     wf = {
         "apiVersion": "argoproj.io/v1alpha1",
         "kind": "Workflow",
-        "metadata": {"name": name or spec.name, "namespace": namespace},
+        "metadata": {
+            "name": name or spec.name,
+            "namespace": namespace,
+            # 版本跟着产物走：线上跑着的工作流能回答"它按哪版 spec 契约编译"。
+            # 排查"本地能跑、集群行为不同"时，第一手信息就是这里。
+            "annotations": {"specargo.dev/spec-version": str(spec.version)},
+        },
         "spec": wf_spec,
     }
     _assert_no_spec_templates(wf, source=spec.name)

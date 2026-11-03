@@ -1,5 +1,6 @@
 # 通用 ETL 管线（框架示例之一）
 # 不含任何领域知识：用 schema + row_count 两个通用检查做质量闸门
+version: 1
 name: etl-demo
 description: 抽取 → 转换 → 校验 → 装载（纯通用，用于验证框架普适性）
 

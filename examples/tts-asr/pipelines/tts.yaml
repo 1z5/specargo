@@ -9,6 +9,7 @@
 #   python3 app/runner.py examples/tts-asr/pipelines/tts.yaml \
 #     --state-db /tmp/tts-state.db --workdir "$PWD/examples/tts-asr" \
 #     -p example_dir="$PWD/examples/tts-asr"
+version: 1
 name: tts-example
 description: 批量 TTS 生成 + ASR 回检（领域插件示例，需外部 key/依赖）
 
