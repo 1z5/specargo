@@ -65,6 +65,10 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 
 - **仓库改名**：GitHub `1z5/tts-pipeline-argo` → `1z5/specargo`（旧 URL 301 重定向已验证）；
   README 标题、badge、`gh workflow run -R`、本地 remote、仓库描述 / topics 已同步。
+- **本地工作副本改名**：`/Users/zephyr/dev/tts-argo` → `/Users/zephyr/dev/specargo`（与 GitHub 同名）。
+  editable 安装的 `.pth` / `direct_url.json` 原本指向旧路径，改名后重跑 `pip install -e .` 刷新；
+  验证：`import specargo` 解析到新路径、五个 console script 正常、离线 135 例全绿、
+  golden 0 漂移、三条管线编译零残留、本地 E2E（dataset 链路 + etl-demo 二次 resume）通过。
 - **代码归档**：TTS/ASR 领域实现整体移入 `examples/tts-asr/`（含 `pipelines/tts.yaml`、
   `k8s/workflow.yaml`、`cronworkflow.yaml`、`Dockerfile`、`requirements.txt`、`docs/VERIFICATION.md`、
   领域测试）；框架层 `app/**` 不含领域字样（CI 纯净度守卫，仅 `envcompat.py` /
