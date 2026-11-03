@@ -166,8 +166,14 @@ class RuntimeConfig:
 
     @classmethod
     def load(cls, path: str | Path) -> "RuntimeConfig":
-        """从 YAML 文件加载（用于 ``--runtime`` 多环境部署）。"""
-        data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        """从 YAML 文件加载（用于 ``--runtime`` 多环境部署）。
+
+        走 ``spec.load_yaml_mapping``：YAML 语法错误必须报成一行 spec 错误，
+        而不是从 ``--runtime`` 这个入口漏出 traceback。
+        """
+        from .spec import load_yaml_mapping
+
+        data = load_yaml_mapping(path, what="运行时配置")
         return cls.from_mapping(data, where=str(path))
 
     # ------------------------------------------------------------------

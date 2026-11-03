@@ -138,10 +138,16 @@ def get_statuses_for(run_id: str, stage: str,
     N=1000 时 O(3N) vs O(N) 差 3 倍；而且 key 能从分区清单直接算出，
     连 LIST 操作都可以省掉。
 
-    语义与 load_statuses + 按 final_stage 过滤**等价**（evaluate_items 只看
-    expected 列表里的条目）。关键细节：读不到/读坏的 key **不产生行**——
-    这样 evaluate_items 才会把它算进"漏数"而不是"未过检"（两者是不同故障：
-    前者是没跑，后者是跑了没过检，告警文案与处理方式都不同）。
+    语义与 load_statuses + 按 final_stage 过滤**严格等价**（evaluate_items 只看
+    expected 列表里的条目）。因此这里对"读不到"和"读坏了"的处理必须和
+    load_statuses 一致：**两者都不产生行，对账一律算"漏数"**。
+
+    为什么不把损坏记成"未过检"（虽然语义上它确实是"跑了但状态不可信"）：
+    status key 是 ``sha256(dataset\x00partition\x00variant)`` 的摘要，**不携带身份**，
+    所以 load_statuses 无法把一条损坏记录还原到具体 item 上。若本函数按已知身份
+    产出 ``status="corrupt"`` 行、而全量读路径产不出，两条路径会对同一次故障给出
+    两种结论（一个"漏数"、一个"未过检"），onExit 告警与人工复查会互相矛盾。
+    要让损坏也精确归因，需要改 key 设计（把身份编进 key），见 docs/ROADMAP.md。
     """
     rows: list[dict] = []
     for dataset, partition, variant in items:
@@ -151,9 +157,10 @@ def get_statuses_for(run_id: str, stage: str,
         except FileNotFoundError:
             continue                            # 无状态对象 → 让对账算"漏数"
         except Exception as exc:               # 单条坏记录不应让整批对账崩掉
-            print(f"[journal] 状态记录损坏（按缺失处理）: {key}: {exc!r}",
+            # 与 load_statuses 一致：损坏不产出行 → 也算"漏数"。原因见函数 docstring
+            # （status key 不携带身份，全量读路径无法把损坏记录挂回某个 item）。
+            print(f"[journal] 状态记录损坏（按漏数计入）: {key}: {exc!r}",
                   file=sys.stderr)
-            continue
     return rows
 
 

@@ -1,7 +1,7 @@
 # specargo
 
 ![unit-tests](https://github.com/1z5/specargo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：160 个离线用例（框架 156 + 领域示例 4），Python 3.11 + 3.12 -->
+<!-- unit-tests：164 个离线用例（框架 160 + 领域示例 4），Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/specargo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一个声明式批量数据管线框架：定义一次，本地可跑，也能编译成 Argo CRD 上集群。**
@@ -20,9 +20,12 @@ CI 的纯净度守卫对它们例外）。仓库自带一个来自真实生产�
 
 > **边界（说清楚，不含糊）**：编译器覆盖 container 命令 + checks + artifacts +
 > 参数/扇出/检查配置映射，并对编译产物做"零残留模板变量"自检；集群侧另有**可选的
-> 状态日志 + onExit 对账**（`k8s.journal: true` 开启）。script 型 template、
+> 状态日志 + onExit 对账**（`k8s.journal: true` 开启），以及**集群侧 task 级断点续跑**
+> （`k8s.resume: true`：stage 启动先查状态日志，终态即跳过；已在 CI 真集群验证，前提是
+> run_id 稳定——固定 workflow 名，续跑前先删同名 workflow）。script 型 template、
 > synchronization、suspend 尚未映射；集群 gate 只支持单文件 artifact 的跨 Pod 校验；
-> 集群侧断点续跑（skip）仍未映射。详见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
+> 「不拉 Pod」形态的 skip（WorkflowTemplate + `when`）仍未做。
+> 详见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
 
 设计来自我在真实内容生产环境做批量 TTS/ASR 管线的经验：先有领域管线，再把可复用的部分
 剥成框架。领域实现没有删除，而是归档为 `examples/tts-asr/`，用来对照"框架契约 vs 领域知识"的边界。
@@ -124,7 +127,7 @@ YAML
 specargo-compile pipelines/etl-demo.yaml --runtime /tmp/compiled/runtime.yaml \
   -o /tmp/compiled/etl-demo-prod.yaml
 
-# 4) 离线测试：160 例（框架 156 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
+# 4) 离线测试：164 例（框架 160 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
 for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 
 # 5) 集群冒烟（CI 自动跑；也可手动触发）
@@ -234,7 +237,7 @@ k8s:
 > 一份式的项目状态快照（已验证 / 未验证 / 已知边界 / 下一步）见 [`docs/STATUS.md`](docs/STATUS.md)，
 > 本章是它的展开版。
 
-**已验证（160 个离线用例 = 框架 156 + 领域示例 4，+ 集群 E2E）**：
+**已验证（164 个离线用例 = 框架 160 + 领域示例 4，+ 集群 E2E）**：
 
 - 框架 `tests/test_framework.py`（32 例）：spec 解析与严格校验、四类通用检查、runner 断点跳过 /
   依赖阻断 / 重试 / attempt 计数、对账按 variant 分组抓假绿、`spec2argo` 编译产物结构 /
@@ -463,7 +466,7 @@ examples/tts-asr/         领域插件示例（TTS 生成 + ASR 回检 + 对账�
 pipelines/                通用管线定义（dataset-build.yaml / etl-demo.yaml）
 k8s/                      CI 基础设施（object-store / artifact-repository / 历史 smoke）
 docs/                     架构（ARCHITECTURE.md）与计划（ROADMAP.md）
-tests/                    离线测试（框架 156 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
+tests/                    离线测试（框架 160 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
 Dockerfile                通用 CI 镜像（pip install specargo + moto S3）
 ```
 

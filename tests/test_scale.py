@@ -118,6 +118,39 @@ def test_direct_read_equals_full_load_filtered():
 # 2. 读次数：末 stage 直读是 N 次 GET，不是 3N，且不 LIST
 # ---------------------------------------------------------------------------
 
+def test_corrupt_status_record_is_missing_in_both_read_paths():
+    """损坏的状态对象：两条读路径都必须判"漏数"，且对账结论完全一致。
+
+    这是**有意的设计取舍**，不是遗漏：status key 是 (dataset, partition, variant)
+    的摘要、不携带身份，load_statuses 无法把损坏记录挂回具体 item。若直读路径
+    按已知身份记成"未过检"、全量读路径记成"漏数"，同一次故障会出现两种告警。
+    要让损坏也精确归因，得改 key 设计（见 docs/ROADMAP.md）。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        os.environ.update({"OBJSTORE_KIND": "local", "OBJSTORE_ROOT": str(Path(d) / "a")})
+        for i in range(3):
+            journal.put_status(run_id="c1", dataset="ds", partition=str(i),
+                               variant="", stage="load", status=VERIFIED)
+        # 把 partition 1 的状态对象写坏
+        from specargo.objstore import _store
+        bad = Path(d) / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        _store().put(bad, journal.status_key("c1", "load", "ds", "1", ""))
+
+        items = [("ds", str(i), "") for i in range(3)]
+        direct = journal.get_statuses_for("c1", "load", items)
+        full = [r for r in journal.load_statuses("c1") if r.get("stage") == "load"]
+
+        a = reconcile_datasets(["ds"], items, direct, final_stage="load",
+                               terminal_statuses=(VERIFIED,))
+        b = reconcile_datasets(["ds"], items, full, final_stage="load",
+                               terminal_statuses=(VERIFIED,))
+        assert a == b, (a, b)
+        assert a[0]["missing"] == ["1"], a          # 损坏 → 漏数
+        assert a[0]["not_verified"] == [], a        # 不是"未过检"
+        assert a[0]["ok"] is False, a
+
+
 def test_reconcile_reads_only_final_stage():
     """对账只读末 stage：GET 次数 == 分区数，且不做 LIST。"""
     with tempfile.TemporaryDirectory() as d:

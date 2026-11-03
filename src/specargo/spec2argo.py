@@ -721,8 +721,12 @@ def main(argv: list[str] | None = None) -> int:
     spec = load_spec(args.spec)
     runtime = RuntimeConfig.from_spec(spec)
     if args.runtime:
+        from .spec import load_yaml_mapping
+
+        # 与 RuntimeConfig.load 同一出口：--runtime 写错 YAML 也必须是
+        # "一行 spec 错误 + 退出码 2"，不能漏 traceback。
         runtime.apply_mapping(
-            yaml.safe_load(Path(args.runtime).read_text(encoding="utf-8")) or {},
+            load_yaml_mapping(args.runtime, what="运行时配置"),
             where=args.runtime)
     if args.reference:
         template = compile_template(spec, name=args.name, namespace=args.namespace,

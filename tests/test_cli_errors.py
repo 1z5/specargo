@@ -153,6 +153,58 @@ def test_unified_entry_without_args_prints_help_and_exits_2():
     assert "usage: specargo" in result.stdout, result.stdout
 
 
+# ---------------- YAML 语法错误：必须是"一行提示 + 退出码 2"，不能吐 traceback ----------------
+#
+# 这是一个真实缺口：PyYAML 的 ScannerError/ParserError 之前三处裸 yaml.safe_load
+# 都没捕获，于是"少写一个冒号"会打印整屏 traceback、退出码还是 1（和执行失败混在一起）。
+# YAML 写错属于用户输入问题，和 SpecError 走同一个出口。
+
+_BROKEN_YAML = """\
+name: broken
+stages:
+  - name: s
+    command: "x"
+   bad-indent: 1
+"""
+
+
+def test_broken_yaml_run_is_usage_error_without_traceback():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        spec = _write(tmp, "broken.yaml", _BROKEN_YAML)
+        result = _run(["-m", "specargo.runner", spec])
+        assert result.returncode == 2, result.returncode
+        text = _stderr(result)
+        assert "Traceback" not in text, text
+        assert "YAML 语法错误" in text, text
+        assert "行" in text and "列" in text, text      # 行列号可定位
+
+
+def test_broken_yaml_compile_is_usage_error_without_traceback():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        spec = _write(tmp, "broken.yaml", _BROKEN_YAML)
+        result = _run(["-m", "specargo.spec2argo", spec, "-o", str(tmp / "wf.yaml")])
+        assert result.returncode == 2, result.returncode
+        text = _stderr(result)
+        assert "Traceback" not in text, text
+        assert "YAML 语法错误" in text, text
+
+
+def test_broken_runtime_yaml_is_usage_error_without_traceback():
+    """--runtime 入口同样不能漏 traceback（之前它自己裸读 YAML）。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        spec = _write(tmp, "good.yaml", _GOOD_SPEC)
+        broken_runtime = _write(tmp, "runtime.yaml", "parallelism: [\n")
+        result = _run(["-m", "specargo.spec2argo", spec,
+                       "--runtime", broken_runtime, "-o", str(tmp / "wf.yaml")])
+        assert result.returncode == 2, result.returncode
+        text = _stderr(result)
+        assert "Traceback" not in text, text
+        assert "YAML 语法错误" in text, text
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

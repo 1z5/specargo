@@ -551,12 +551,39 @@ def _str_map(value, where: str) -> dict[str, str]:
     return dict(value)
 
 
-def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
-    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+def _yaml_error_message(path, exc: yaml.YAMLError) -> str:
+    """把 PyYAML 的异常翻成一行可行动的错误（带行号列号）。
+
+    YAML 语法错误是**用户输入问题**，不是框架 bug：必须和 SpecError 走同一个出口
+    （一行提示 + 退出码 2），而不是漏出 traceback——否则"少写一个冒号"看起来像程序崩了。
+    """
+    mark = getattr(exc, "problem_mark", None)
+    where = ""
+    if mark is not None:
+        where = f" 第 {mark.line + 1} 行第 {mark.column + 1} 列"
+    problem = getattr(exc, "problem", None) or str(exc).strip().splitlines()[0]
+    return f"{path}: YAML 语法错误{where}: {problem}"
+
+
+def load_yaml_mapping(path: str | Path, *, what: str = "管线定义") -> dict:
+    """读取 YAML 文件并要求顶层是映射；所有失败都转成 ``SpecError``。
+
+    spec / runtime / 其它 YAML 入口共用这一份实现，避免"某个入口漏捕获 YAMLError
+    于是吐 traceback"这类不一致。
+    """
+    try:
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise SpecError(_yaml_error_message(path, exc)) from None
     if raw is None:
-        raise SpecError(f"{path}: 空文件（没有任何管线定义）")
+        raise SpecError(f"{path}: 空文件（没有任何{what}）")
     if not isinstance(raw, dict):
         raise SpecError(f"{path}: 顶层必须是 YAML 映射，实际是 {type(raw).__name__}")
+    return raw
+
+
+def load_spec(path: str | Path, overrides: dict | None = None) -> PipelineSpec:
+    raw = load_yaml_mapping(path, what="管线定义")
     # 版本必须在字段校验**之前**处理：高版本 spec 的新字段要先由迁移链搬到当前形态，
     # 否则用户看到的是"未知字段"这种误导性报错，而不是"该升级 specargo"。
     _check_version_aliases(raw, str(path))

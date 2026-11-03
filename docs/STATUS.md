@@ -14,13 +14,13 @@
 ## 1. 一句话结论
 
 框架层（spec 解析 → 本地 runner / Argo 编译器 → 质量闸门 → 状态登记 → 对账）功能闭环，
-**160 个离线用例 + 本地 E2E + kind 真实集群 E2E 三侧都有实测证据**；
+**164 个离线用例 + 本地 E2E + kind 真实集群 E2E 三侧都有实测证据**；
 剩下的缺口集中在"生产级环境的非功能性验证"（真对象存储吞吐、千级 Pod、多副本 HA）
 和三个未映射的 Argo 特性（集群 skip、script template、synchronization/suspend）。
 
 ## 2. 已验证
 
-### 2.1 离线套件：160 例全绿（框架 156 + 领域示例 4）
+### 2.1 离线套件：164 例全绿（框架 160 + 领域示例 4）
 
 | 套件 | 例数 | 覆盖要点 |
 |---|---|---|
@@ -31,8 +31,8 @@
 | `tests/test_runtime.py` | 10 | `RuntimeConfig` 三级优先级与严格校验（内置默认 < spec `runtime:` < CLI `--runtime`） |
 | `tests/test_resume_state.py` | 8 | 指纹跳过与输入变化、输出缺失重生成、item 状态幂等 upsert、对账漏数 / 未过检、旧库 schema 自动迁移 |
 | `tests/test_state_store.py` | 9 | `StateStore` 协议下两个实现的 item / run 读写语义一致 |
-| `tests/test_scale.py` | 6 | 千级分区规模与耗时上界、直读 == 全量读、GET 次数硬断言、check-skip O(1) |
-| `tests/test_cli_errors.py` | 8 | CLI 契约：spec 写错 → 退出码 2 + 一行提示（无 traceback）、管线跑挂 → 退出码 1、统一入口 `specargo <cmd>` 可用、子命令 `--help` 透传、未知命令拒绝 |
+| `tests/test_scale.py` | 7 | 千级分区规模与耗时上界、直读 == 全量读（含损坏状态记录的分类一致性）、GET 次数硬断言、check-skip O(1) |
+| `tests/test_cli_errors.py` | 11 | CLI 契约：spec 写错 → 退出码 2 + 一行提示（无 traceback）、管线跑挂 → 退出码 1、统一入口 `specargo <cmd>` 可用、子命令 `--help` 透传、未知命令拒绝、**YAML 语法错误 → 一行提示 + 退出码 2（三个入口均无 traceback）** |
 | `tests/test_parallelism.py` | 7 | 扇出并发上限：默认不写、`runtime.parallelism` 落到 `spec.parallelism`、旧名 `k8s:` 同样生效、`--runtime` 覆盖、模板携带、非法值与拼错键名拒绝 |
 | `tests/test_spec_version.py` | 10 | spec 契约版本：缺省不告警、高版本报"升级 specargo"、误写字段名给正确提示、迁移链按序执行且告警默认可见、缺迁移实现明确报错、编译产物带 `specargo.dev/spec-version` 注解 |
 | `tests/test_golden.py` | 4 | golden 编译产物 drift 检测（5 份 golden：普通 / journal / podGC-off / 领域插件 / etl） |

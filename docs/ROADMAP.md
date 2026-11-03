@@ -24,8 +24,9 @@
 本地 runner 与集群执行自此共享同一份 spec；`k8s/workflow-etl-smoke.yaml` 降级为对照参考。
 
 已知边界：编译器覆盖 container 命令 + checks + artifacts + 参数 / 扇出 / 检查配置映射，
-以及可选的 `k8s.journal`（状态日志 + onExit 对账）；script 型 template、
-synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实现（见下节「已知边界」）。
+以及可选的 `k8s.journal`（状态日志 + onExit 对账）与 `k8s.resume`（集群侧 task 级断点续跑，
+已完成并真集群验证，见 1.2）；script 型 template、synchronization、suspend 尚未映射；
+「不拉 Pod」形态的 skip（WorkflowTemplate + `when`）仍未做。
 
 ### ✅ P0 正确性修复（本轮）
 
@@ -60,7 +61,16 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 - 旧状态库迁移边角：旧表与新表并存时只告警、不自动合并（避免误判数据归属）；`schema_version` 只升不降。
 - 集群插件加载需要领域镜像内含插件模块，并由 `k8s.plugin_path` 指明路径；通用镜像不带领域插件。
 
-**仍未做**：集群侧断点续跑（skip）；`onExit` 需要 `k8s.journal: true` 显式开启（默认关闭，CI 未覆盖该路径的真集群行为）。
+**仍未做 / 注意**：
+- 「不拉 Pod」形态的集群 skip（需要 WorkflowTemplate + `when`）；当前的 `k8s.resume` 是
+  **task 级**跳过（stage 启动先查状态日志，终态则 exit 0），Pod 仍会被调度。
+- `k8s.journal: true` 默认关闭；CI 已覆盖该路径的真集群行为（journal=on 变体，断言 onExit +
+  对账 PASS + 15 个状态对象）。
+- 集群 resume 的前提是 **run_id 稳定**：workflow 名固定，跨提交续跑要先删除同名 workflow
+  再重提（Argo 默认会 AlreadyExists 挡住第二次提交）；CI 4.6 就是这么做的。
+- resume 跳过只依据状态日志，**不校验产物是否仍可取**：若对象存储里上一轮的产物已过期，
+  下游 gate 的 `objstore get` 会失败（fail-loud，不会静默错），但报错指向"取数失败"而非
+  "状态说完成但产物缺失"，排障时需要注意。
 
 ### ✅ 改名 `specargo` + TTS 归档 `examples/tts-asr/`（本轮）
 
@@ -88,8 +98,19 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 - ✅ gate / state / reconcile 已编译为对 `pipeline_cli.py` 的调用，不再内嵌 Python 片段；
 - ✅ 集群侧可选状态日志（`k8s.journal: true`）+ `onExit` 对账 + webhook；
   ✅ CI kind smoke 额外提交 journal=on 变体，**真实集群已通过**（onExit 1/1、对账 PASS、15 状态对象 + 分区清单）；
-- ⬜ 集群侧断点续跑（skip）未实现：需要在 stage 启动时查状态日志并跳过；
+- ✅ 集群侧 task 级断点续跑（`k8s.resume`）：stage 启动先 `state check-skip`，终态则跳过；
+  CI 4.6 真集群验证（删 workflow → 同名重提 → 所有 stage 打印 `[resume] 已完成，跳过`）；
+- ⬜ 「不拉 Pod」形态的 skip（WorkflowTemplate + `when`）：当前跳过发生在 Pod 内部，
+  省的是重算不是调度；
 - ⬜ 真实部署的并发/规模验证（对象存储状态日志的对象数随 stage×partition 增长）。
+
+### 1.2.1 可选改进：让损坏的状态记录可精确归因
+
+当前状态对象的 key 是 `runs/<run>/_status/<stage>/<sha256(dataset,partition,variant)[:16]>.json`，
+**key 不携带身份**，所以两条读路径（末 stage 直读 / 全量读）都无法把一条损坏记录还原到
+具体 item 上，只能一致地判为"漏数"。若希望区分"跑了但状态不可信"（未过检）与"没跑过"（漏数），
+需要在 key 里编入可解析的身份（如 `<dataset>/<partition>/<variant>.json`，注意路径转义与长度），
+或额外维护一份 key→身份 的索引对象。
 
 ### 1.5 golden 编译产物 + RuntimeConfig（已完成）
 
