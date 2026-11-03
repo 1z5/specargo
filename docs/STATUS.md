@@ -5,9 +5,9 @@
 > 只能由设计或代码推断、但没有实测证据的，一律写进"未验证"。
 > 计划与取舍见 [`ROADMAP.md`](ROADMAP.md)，架构与模块边界见 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
 
-**快照**：基线提交 `8185df6`（`main`，本地 == `origin/main`，spec 契约版本 `version` 落地那次），
-文档状态更新于 2026-11-03。该提交的 CI：`unit-tests` 41621932563（success）、
-`k8s-smoke` 41621932619（success）。
+**快照**：基线提交 `8124f88`（`main`，本地 == `origin/main`，CLI 错误分流 + 扇出并发上限那次），
+文档状态更新于 2026-11-03。该提交的 CI：`unit-tests` 41624774140（success）、
+`k8s-smoke` 41624774452（success）。
 
 ---
 
@@ -63,8 +63,9 @@ etl-demo  ：specargo-run 首跑 汇总 verified=9，对账 ok=True
 
 ### 2.4 真实集群（kind 1 控制面 + 2 worker + Argo Workflows v3.7.18，CI 每次 push 自动验）
 
-最近一次代码提交 `8185df6`（spec 契约版本）的两个 job 均 success：`unit-tests` 41621932563、
-`k8s-smoke` 41621932619——加了版本注解后真集群行为零退化（31/31 Pod、onExit 1/1、对账 PASS）。
+最近一次代码提交 `8124f88`（CLI 错误分流 + 并发上限）的两个 job 均 success：`unit-tests` 41624774140、
+`k8s-smoke` 41624774452——真集群零退化（31/31 Pod、onExit 1/1、对账 PASS、15 状态对象）。
+未配置 `parallelism` 的编译产物保持原样（golden 0 漂移），所以集群侧不需要新断言。
 
 主工作流（`spec2argo` 编译产物直接提交）：
 
