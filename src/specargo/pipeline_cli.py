@@ -183,9 +183,11 @@ def cmd_reconcile_journal(args) -> int:
         if ds not in datasets:
             datasets.append(ds)
 
-    from .journal import load_statuses
-    rows = load_statuses(args.run_id)
+    from .journal import get_statuses_for
     terminal = json.loads(args.terminal_statuses) if args.terminal_statuses else ["verified"]
+    # 只读末 stage 的状态（key 可从分区清单直接算出）：比列举并读全部状态
+    # 少 2/3 的对象存储 GET，且不需要 LIST——千级分区时差别是分钟级。
+    rows = get_statuses_for(args.run_id, args.final_stage, expected)
     recons = reconcile_datasets(datasets, expected, rows,
                                 final_stage=args.final_stage,
                                 terminal_statuses=terminal)

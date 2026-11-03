@@ -129,6 +129,34 @@ def load_statuses(run_id: str) -> list[dict]:
     return rows
 
 
+def get_statuses_for(run_id: str, stage: str,
+                     items) -> list[dict]:
+    """按分区清单直接算 key，只读某个 stage 的状态（onExit 对账专用）。
+
+    为什么不复用 ``load_statuses``：对账只关心**末 stage**的状态，而
+    ``load_statuses`` 会把 3×N 个状态全读一遍。S3 上每次 GET 都是网络往返，
+    N=1000 时 O(3N) vs O(N) 差 3 倍；而且 key 能从分区清单直接算出，
+    连 LIST 操作都可以省掉。
+
+    语义与 load_statuses + 按 final_stage 过滤**等价**（evaluate_items 只看
+    expected 列表里的条目）。关键细节：读不到/读坏的 key **不产生行**——
+    这样 evaluate_items 才会把它算进"漏数"而不是"未过检"（两者是不同故障：
+    前者是没跑，后者是跑了没过检，告警文案与处理方式都不同）。
+    """
+    rows: list[dict] = []
+    for dataset, partition, variant in items:
+        key = status_key(run_id, stage, dataset, partition, variant)
+        try:
+            rows.append(_read_temp(key))
+        except FileNotFoundError:
+            continue                            # 无状态对象 → 让对账算"漏数"
+        except Exception as exc:               # 单条坏记录不应让整批对账崩掉
+            print(f"[journal] 状态记录损坏（按缺失处理）: {key}: {exc!r}",
+                  file=sys.stderr)
+            continue
+    return rows
+
+
 def put_partitions(run_id: str, partitions: list[dict]) -> None:
     path = _write_temp(partitions)
     try:

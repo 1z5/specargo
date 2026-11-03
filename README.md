@@ -1,7 +1,7 @@
 # specargo
 
 ![unit-tests](https://github.com/1z5/specargo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：129 个离线用例（框架 125 + 领域示例 4），Python 3.11 + 3.12 -->
+<!-- unit-tests：135 个离线用例（框架 131 + 领域示例 4），Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/specargo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一个声明式批量数据管线框架：定义一次，本地可跑，也能编译成 Argo CRD 上集群。**
@@ -124,7 +124,7 @@ YAML
 specargo-compile pipelines/etl-demo.yaml --runtime /tmp/compiled/runtime.yaml \
   -o /tmp/compiled/etl-demo-prod.yaml
 
-# 4) 离线测试：129 例（框架 125 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
+# 4) 离线测试：135 例（框架 131 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
 for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 
 # 5) 集群冒烟（CI 自动跑；也可手动触发）
@@ -184,13 +184,17 @@ k8s:
    可选发送 webhook。分区清单缺失时的策略：**工作流已失败**才跳过对账（不掩盖原失败）；
    **成功路径**却缺清单会直接失败（无法证明数据完整，防止假绿）。
 
+   对账只读**末 stage** 的状态（key 从分区清单直接算出，不需要 LIST）：N=1000 时
+   实测 1000 次 GET、0.18s 读完、对账 0ms，比"列举并读全部 3N 个状态"少 2/3 的
+   对象存储往返。**漏数**（没有状态对象）与**未过检**（跑了但没过检）分开报告。
+
 > 集群侧**断点续跑**需 `k8s.resume: true` 显式开启（默认关，与 CI 现有断言一致）。
 > 注意：跳过发生在 task 内部，Argo 侧仍会拉起 Pod；要省 Pod 需配合
 > WorkflowTemplate/`when`（见 ROADMAP）。
 
 ## 已验证 / 未验证
 
-**已验证（129 个离线用例 = 框架 125 + 领域示例 4，+ 集群 E2E）**：
+**已验证（135 个离线用例 = 框架 131 + 领域示例 4，+ 集群 E2E）**：
 
 - 框架 `tests/test_framework.py`（32 例）：spec 解析与严格校验、四类通用检查、runner 断点跳过 /
   依赖阻断 / 重试 / attempt 计数、对账按 variant 分组抓假绿、`spec2argo` 编译产物结构 /
@@ -215,6 +219,9 @@ k8s:
 - 编译产物门禁：CI 对全部编译产物断言"零残留模板变量"；golden 套件锁住编译器行为
   （含 journal / podGC 关闭 / 领域插件三种形态），编译器 drift 会直接红
 - 运行时配置：`RuntimeConfig` 三级优先级与严格校验（`tests/test_runtime.py` 10 例）
+- 规模压测（`tests/test_scale.py` 6 例）：1000 分区 × 3 stage = 3000 状态对象，
+  对账 **1000 次 GET / 0.18s / 对账 0ms / LIST 0 次**；直读与全量读结论逐条一致；
+  漏数与未过检分类不退化；`check-skip` 单点读 O(1)
 - golden 编译产物（`tests/test_golden.py` 4 例）：编译器 drift 直接失败
 - CI：`unit-tests` 在 Python 3.11 / 3.12 上跑全部离线套件 + 框架纯净度守卫；
   `k8s-smoke` 在 kind 多节点 + Argo Workflows v3.7.18 上提交 `spec2argo` 编译产物，
@@ -407,7 +414,7 @@ examples/tts-asr/         领域插件示例（TTS 生成 + ASR 回检 + 对账�
 pipelines/                通用管线定义（dataset-build.yaml / etl-demo.yaml）
 k8s/                      CI 基础设施（object-store / artifact-repository / 历史 smoke）
 docs/                     架构（ARCHITECTURE.md）与计划（ROADMAP.md）
-tests/                    离线测试（框架 125 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
+tests/                    离线测试（框架 131 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
 Dockerfile                通用 CI 镜像（pip install specargo + moto S3）
 ```
 

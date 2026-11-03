@@ -42,7 +42,7 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 | 10 | 自动生成的 objstore `--file` 未加引号（路径含空格失败）；gate 未声明 dataset/variant 输入 | 路径统一 `shlex.quote`；gate inputs/args 补齐三个维度 |
 | 11 | 文档与实际不符（死命令 / 数字 / 夸大） | README / ARCHITECTURE / ROADMAP 按实测证据校正 |
 
-新增回归：`tests/test_p0_regressions.py`；离线套件合计 **129 例**（框架 125 + 领域示例 4），全部通过。
+新增回归：`tests/test_p0_regressions.py`；离线套件合计 **135 例**（框架 131 + 领域示例 4），全部通过。
 验证方式：本地四套件 + ETL / dataset 管线 E2E + 编译产物零残留 + 独立 Argo 模拟器
 （每个 task-item 独立目录、只共享对象存储）跑通 etl-demo 与 dataset-build 的编译产物；
 真实集群侧由 CI 的 kind smoke 继续验证。
@@ -126,8 +126,6 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 
 ## 扩展验证
 
-### 2. 规模测试：千级分区
-
 `partitions: {from: range, start: 1, end: 200}` 跑一轮，观测：
 - workflow-controller 的队列深度与 API server QPS
 - Pod 调度延迟、`parallelism` 上限
@@ -149,6 +147,14 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 - CI 真集群验证：`kubectl apply` 模板 → 提交引用 → 断言 Succeeded 且节点由模板展开。
 - 灰度/回滚做法：模板名不变、内容更新（`kubectl apply` 新版本），新提交的 Workflow
   自动用新版本；回滚即重新 apply 旧版本。已在 README「工作流版本化」写明。
+
+## 规模与性能（已完成）
+
+- 千级分区实测（`tests/test_scale.py`）：1000 分区 × 3 stage = 3000 个状态对象，
+  写 0.7s、末 stage 直读 0.18s、对账 0ms、**GET 次数 = 1000（不是 3000）**、LIST 0 次。
+- 直读路径与"全量读 + 按 final_stage 过滤"结论逐条一致（含缺失/损坏/非终态），
+  漏数与未过检在报告里分开。
+- 未验证：真实 S3/MinIO 上的网络往返量级、万级分区、controller 限流。
 
 ## 已知未覆盖
 
