@@ -29,6 +29,8 @@ import os
 import sys
 from pathlib import Path
 
+from .cli import friendly_errors
+
 
 def _load_plugins(cli_plugins: list[str] | None, cli_paths: list[str] | None) -> None:
     """按 CLI 参数 + env 加载领域插件（与本地 runner 的 spec.plugins 同源）。"""
@@ -272,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@friendly_errors
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     return args.func(args)

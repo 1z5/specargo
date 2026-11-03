@@ -49,6 +49,7 @@ try:
 except Exception:                                     # pragma: no cover
     connect = None
 
+from .cli import friendly_errors
 from .envcompat import LEGACY_STATE_DB, getenv
 
 VERSION = os.getenv("SERVICE_VERSION", "dev")
@@ -353,7 +354,8 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-def main() -> int:
+@friendly_errors
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Python 常驻处理服务")
     parser.add_argument("--host", default=os.getenv("SERVICE_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("SERVICE_PORT", "8080")))
@@ -366,7 +368,7 @@ def main() -> int:
     parser.add_argument("--state-db",
                         default=getenv("PIPELINE_STATE_DB", LEGACY_STATE_DB, ""))
     parser.add_argument("--processor", default="echo", choices=["echo"])
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     service = Service(state_db=args.state_db or None, workers=args.workers,
                       graceful_timeout=args.graceful_timeout)

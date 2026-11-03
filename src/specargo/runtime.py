@@ -32,7 +32,7 @@ RUNTIME_KEYS = {
     "image", "image_pull_policy", "service_account", "namespace",
     "objstore_endpoint", "objstore_env", "volumes", "mounts",
     "active_deadline_seconds", "pod_gc_strategy", "journal",
-    "notify_webhook", "plugin_path", "resume",
+    "notify_webhook", "plugin_path", "resume", "parallelism",
 }
 _STRING_KEYS = ("image", "image_pull_policy", "service_account", "namespace",
                 "objstore_endpoint", "pod_gc_strategy", "notify_webhook",
@@ -57,6 +57,9 @@ class RuntimeConfig:
     volumes: dict[str, Any] = field(default_factory=dict)
     mounts: dict[str, str] = field(default_factory=dict)
     active_deadline_seconds: int = 1800
+    #: workflow 级并发上限（Argo ``spec.parallelism``）：0 = 不写该字段（Argo 默认不限）。
+    #: 扇出管线（N 分区 × M 个 stage/gate）没有它时，controller 会一次性收到 N×M 个 Pod 请求。
+    parallelism: int = 0
     pod_gc_strategy: str = "OnWorkflowSuccess"
     journal: bool = False
     #: 集群 resume：stage 启动时查状态日志，已到终态则跳过（不重跑、不重复写产物）
@@ -95,6 +98,13 @@ class RuntimeConfig:
             raise SpecError(
                 f"{where}.active_deadline_seconds 必须是整数，"
                 f"实际 {data['active_deadline_seconds']!r}")
+        if "parallelism" in data:
+            value = data["parallelism"]
+            # bool 是 int 的子类（True 会被当成 1），必须显式拒绝
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise SpecError(
+                    f"{where}.parallelism 必须是正整数（并发 Pod 上限；不写 = 不限），"
+                    f"实际 {value!r}")
         if "objstore_env" in data:
             obj_env = data["objstore_env"]
             if not isinstance(obj_env, dict):

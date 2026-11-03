@@ -46,6 +46,7 @@ from pathlib import Path
 
 import yaml
 
+from .cli import friendly_errors
 from .resume_policy import stage_terminal_statuses
 from .runtime import OBJSTORE_KEY_ROOT, RUN_ID_ENV, RuntimeConfig
 from .spec import PipelineSpec, SpecError, Stage, load_spec
@@ -636,6 +637,10 @@ def compile_workflow(spec: PipelineSpec, *, name: str | None = None,
         "volumes": [{"name": n, **v} for n, v in volumes.items()],
         "templates": templates,
     }
+    if runtime.parallelism:
+        # 扇出管线的第一道闸：不写就是 Argo 默认（不限），一旦写了就限制**整个 workflow**
+        # 同时在跑的 Pod 数（含 gate 与 onExit），避免 N 分区 × M stage 一次性打爆 controller。
+        wf_spec["parallelism"] = runtime.parallelism
     if pod_gc_strategy:
         wf_spec["podGC"] = {"strategy": pod_gc_strategy}
     if journal:
@@ -698,7 +703,8 @@ def render_reference(template: dict, *, name: str, arguments: dict | None = None
     }
 
 
-def main() -> int:
+@friendly_errors
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="把管线定义编译成 Argo Workflow")
     parser.add_argument("spec", help="pipelines/*.yaml")
     parser.add_argument("-o", "--output", help="输出路径（默认 stdout）")
@@ -710,7 +716,7 @@ def main() -> int:
                         help="编译成 WorkflowTemplate（可注册到集群、被多个 Workflow 引用）")
     parser.add_argument("--reference", metavar="NAME",
                         help="生成引用该模板的最小 Workflow（与 --as-template 配合使用）")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     spec = load_spec(args.spec)
     runtime = RuntimeConfig.from_spec(spec)

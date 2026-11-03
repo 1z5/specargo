@@ -1,7 +1,7 @@
 # specargo
 
 ![unit-tests](https://github.com/1z5/specargo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：145 个离线用例（框架 141 + 领域示例 4），Python 3.11 + 3.12 -->
+<!-- unit-tests：160 个离线用例（框架 156 + 领域示例 4），Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/specargo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一个声明式批量数据管线框架：定义一次，本地可跑，也能编译成 Argo CRD 上集群。**
@@ -86,7 +86,7 @@ YAML spec ─► spec.py 解析/校验 ─► runner.py 本地执行 ─► chec
 | **可观测性** | `metrics.py` Prometheus text 格式指标（执行数 / 耗时分布 / 积压 / 对账缺失 / inflight；`stage_progress` 已定义但当前未接线） |
 | **存储抽象** | `artifacts.py` 对象存储契约 + 本地目录 / S3 兼容双实现，key 目录穿越防护；`objstore.py` 是集群内 put/get CLI；跨 Pod 走路径契约 `runs/<run_id>/<partition>/<stage>.<ext>` |
 | **容器与编排** | 根目录 `Dockerfile`（pip install specargo + moto S3）+ `k8s/object-store.yaml` / `artifact-repository.yaml`；CI 在 kind + Argo Workflows v3.7.18 上实测跑通（见「已验证」）。`k8s/workflow-etl-smoke.yaml` 是历史手写对照 |
-| **运行时配置** | `RuntimeConfig`（`runtime.py`）：镜像 / 命名空间 / SA / 挂载 / 对象存储 / deadline / podGC 集中一处；优先级：内置默认 < spec `runtime:` 节（旧名 `k8s:` 仍兼容）< CLI `--runtime runtime.yaml`（按 key 覆盖，一份 spec 多环境） |
+| **运行时配置** | `RuntimeConfig`（`runtime.py`）：镜像 / 命名空间 / SA / 挂载 / 对象存储 / deadline / podGC / **并发上限** 集中一处；优先级：内置默认 < spec `runtime:` 节（旧名 `k8s:` 仍兼容）< CLI `--runtime runtime.yaml`（按 key 覆盖，一份 spec 多环境） |
 | **编译器回归** | golden 编译产物（`tests/golden/` + `tests/test_golden.py`）：编译器行为变更必须显式 `python3 tests/update_golden.py` 更新 golden，否则以 drift 失败——防"顺手改坏编译器" |
 | **模板与版本化** | `specargo-compile --as-template` 把同一份 spec 发布成 WorkflowTemplate，`--reference` 生成引用它的最小 Workflow；升级/回滚只改模板，提交侧不变（CI 真集群验证：注册 → 引用 → 执行） |
 | **成本与效率** | 并发与重试参数化、输入指纹避免重复计算、`--force` 受控重处理、stage 级 requests/limits 编译进 container；`nodeSelector`/`tolerations` 编译器尚未映射 |
@@ -124,7 +124,7 @@ YAML
 specargo-compile pipelines/etl-demo.yaml --runtime /tmp/compiled/runtime.yaml \
   -o /tmp/compiled/etl-demo-prod.yaml
 
-# 4) 离线测试：145 例（框架 141 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
+# 4) 离线测试：160 例（框架 156 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
 for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 
 # 5) 集群冒烟（CI 自动跑；也可手动触发）
@@ -205,6 +205,7 @@ version: 1            # 可选：不写就是当前版本；写错 / 写高都�
 k8s:
   journal: true          # 开启状态日志 + onExit 对账
   resume: true           # 可选：已成功的 stage×分区直接跳过（集群断点续跑）
+  parallelism: 20        # 可选：整条 workflow 同时最多 20 个 Pod（不写 = 不限）
   notify_webhook: ""     # 可选：onExit 对账结果发送到钉钉/飞书/Slack
   objstore_env: {OBJSTORE_BUCKET: argo-artifacts}   # 可选：对象存储连接参数
 ```
@@ -233,7 +234,7 @@ k8s:
 > 一份式的项目状态快照（已验证 / 未验证 / 已知边界 / 下一步）见 [`docs/STATUS.md`](docs/STATUS.md)，
 > 本章是它的展开版。
 
-**已验证（145 个离线用例 = 框架 141 + 领域示例 4，+ 集群 E2E）**：
+**已验证（160 个离线用例 = 框架 156 + 领域示例 4，+ 集群 E2E）**：
 
 - 框架 `tests/test_framework.py`（32 例）：spec 解析与严格校验、四类通用检查、runner 断点跳过 /
   依赖阻断 / 重试 / attempt 计数、对账按 variant 分组抓假绿、`spec2argo` 编译产物结构 /
@@ -264,6 +265,12 @@ k8s:
 - spec 版本与兼容（`tests/test_spec_version.py` 10 例）：缺省不告警、高版本报"升级 specargo"、
   误写成 `spec_version` 给正确字段名提示、迁移链按序执行并可自动迁移（告警默认可见）、
   缺迁移实现明确报错、编译产物带 `specargo.dev/spec-version` 注解
+- CLI 错误呈现与统一入口（`tests/test_cli_errors.py` 8 例）：spec 写错 → 退出码 2 + 一行可行动
+  提示（无 traceback）；管线跑挂 → 退出码 1（两种失败在 CI 里可分流）；`specargo <cmd>` 统一入口
+  真的能跑（run / compile / help 透传 / 未知命令）
+- 扇出并发上限（`tests/test_parallelism.py` 7 例）：默认不写该字段、`runtime.parallelism` 精确
+  落到 `spec.parallelism`、旧名 `k8s:` 同样生效、`--runtime` 覆盖、模板同样携带、
+  0 / 负数 / 字符串 / bool / 小数与拼错键名全部拒绝
 - golden 编译产物（`tests/test_golden.py` 4 例）：编译器 drift 直接失败
 - CI：`unit-tests` 在 Python 3.11 / 3.12 上跑全部离线套件 + 框架纯净度守卫；
   `k8s-smoke` 在 kind 多节点 + Argo Workflows v3.7.18 上提交 `spec2argo` 编译产物，
@@ -456,7 +463,7 @@ examples/tts-asr/         领域插件示例（TTS 生成 + ASR 回检 + 对账�
 pipelines/                通用管线定义（dataset-build.yaml / etl-demo.yaml）
 k8s/                      CI 基础设施（object-store / artifact-repository / 历史 smoke）
 docs/                     架构（ARCHITECTURE.md）与计划（ROADMAP.md）
-tests/                    离线测试（框架 141 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
+tests/                    离线测试（框架 156 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
 Dockerfile                通用 CI 镜像（pip install specargo + moto S3）
 ```
 

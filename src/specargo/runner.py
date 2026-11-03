@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .checks import CheckResult, run_check
+from .cli import friendly_errors
 from .metrics import METRICS
 from .spec import Partition, PipelineSpec, build_context, parse_duration, render
 from .envcompat import LEGACY_RUN_ID, LEGACY_STATE_DB, getenv
@@ -386,7 +387,8 @@ class Runner:
 # CLI
 # ---------------------------------------------------------------------------
 
-def main() -> int:
+@friendly_errors
+def main(argv: list[str] | None = None) -> int:
     import argparse
 
     from .spec import load_spec
@@ -404,7 +406,7 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="强制全量重跑")
     parser.add_argument("-p", "--param", action="append", default=[],
                         help="覆盖参数 key=value")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     overrides = dict(kv.split("=", 1) for kv in args.param if "=" in kv)
     spec = load_spec(args.spec, overrides)

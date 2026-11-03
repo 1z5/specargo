@@ -127,7 +127,8 @@
 |---|---|
 | `resume_policy.py` | `stage_terminal_statuses()` / `is_terminal()`：终态判定的唯一实现（本地 runner 与集群 resume 共用，防双份漂移） |
 | `state.py` | `StateStore` 协议 + `SqliteStateStore`（本地）/ `JournalStateStore`（集群，对象存储 journal）；`evaluate_items` 对账 |
-| `runtime.py` | `RuntimeConfig`：执行目标运行时配置（镜像/命名空间/SA/挂载/对象存储/deadline/podGC/插件路径）；来源优先级 = 内置默认 < spec `runtime:` 节（旧名 `k8s:`）< CLI `--runtime`；固定契约 `PIPELINE_RUN_ID` / `runs` | 
+| `runtime.py` | `RuntimeConfig`：执行目标运行时配置（镜像/命名空间/SA/挂载/对象存储/deadline/podGC/插件路径/**并发上限 parallelism**）；来源优先级 = 内置默认 < spec `runtime:` 节（旧名 `k8s:`）< CLI `--runtime`；固定契约 `PIPELINE_RUN_ID` / `runs` |
+| `cli.py` | 统一入口 `specargo <cmd>` + 错误呈现契约：`SpecError` / 文件不存在 → 退出码 2 与一行 stderr；执行失败 → 1；子命令参数原样透传 | 新增子命令时 `main(argv=None)` 必须接受 argv，否则统一入口会把参数传丢（曾因此 `specargo run` 直接 TypeError） | 
 | `plugins.py` | `load(modules, search_dirs=...)`：把 spec 所在目录及其父目录加入 `sys.path`，再 `importlib` 逐个加载；失败抛 `SpecError`（启动期失败，而不是跑到一半发现检查未注册） |
 | `envcompat.py` | `getenv(name, legacy, default)`：新名 `PIPELINE_*` 优先、旧名 `TTS_*` 回退；旧前缀集中在此文件（一个版本后删除） |
 | `legacy_state_migration.py` | 旧状态库迁移：`tts_run` / `tts_item(book_slug, chapter_num, voice, ...)` → `pipeline_run` / `pipeline_item(dataset, partition, variant, ...)`，原地 `ALTER TABLE RENAME`，幂等（一个版本后删除） |

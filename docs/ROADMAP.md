@@ -43,7 +43,7 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
 | 10 | 自动生成的 objstore `--file` 未加引号（路径含空格失败）；gate 未声明 dataset/variant 输入 | 路径统一 `shlex.quote`；gate inputs/args 补齐三个维度 |
 | 11 | 文档与实际不符（死命令 / 数字 / 夸大） | README / ARCHITECTURE / ROADMAP 按实测证据校正 |
 
-新增回归：`tests/test_p0_regressions.py`；离线套件合计 **145 例**（框架 141 + 领域示例 4），全部通过。
+新增回归：`tests/test_p0_regressions.py`；离线套件合计 **160 例**（框架 156 + 领域示例 4），全部通过。
 验证方式：本地四套件 + ETL / dataset 管线 E2E + 编译产物零残留 + 独立 Argo 模拟器
 （每个 task-item 独立目录、只共享对象存储）跑通 etl-demo 与 dataset-build 的编译产物；
 真实集群侧由 CI 的 kind smoke 继续验证。
@@ -68,7 +68,7 @@ synchronization、suspend 尚未映射；集群侧断点续跑（skip）未实�
   README 标题、badge、`gh workflow run -R`、本地 remote、仓库描述 / topics 已同步。
 - **本地工作副本改名**：`/Users/zephyr/dev/tts-argo` → `/Users/zephyr/dev/specargo`（与 GitHub 同名）。
   editable 安装的 `.pth` / `direct_url.json` 原本指向旧路径，改名后重跑 `pip install -e .` 刷新；
-  验证：`import specargo` 解析到新路径、五个 console script 正常、离线 145 例全绿、
+  验证：`import specargo` 解析到新路径、五个 console script 正常、离线 160 例全绿、
   golden 0 漂移、三条管线编译零残留、本地 E2E（dataset 链路 + etl-demo 二次 resume）通过。
 - **代码归档**：TTS/ASR 领域实现整体移入 `examples/tts-asr/`（含 `pipelines/tts.yaml`、
   `k8s/workflow.yaml`、`cronworkflow.yaml`、`Dockerfile`、`requirements.txt`、`docs/VERIFICATION.md`、
@@ -128,6 +128,27 @@ spec 不只是配置，它是**给别人写的契约**：没有版本号时，"�
 
 遗留：v1 是第一版，`_MIGRATIONS` 目前为空；等真正引入 v2 时按同一模式补一条迁移即可。
 
+### 2.6 扇出并发上限 + CLI 错误呈现（已完成）
+
+两个都是"用户第一次跑就会撞上"的问题，不是理论缺陷。
+
+**并发上限**（`runtime.parallelism`）：扇出管线（N 分区 × M 个 stage/gate）在提交瞬间
+会一次性向 controller 投出 N×M 个 Pod 请求——真实瓶颈不是"跑得慢"，而是队列被打爆、
+调度排队、kind 单节点直接拒绝。
+
+- 可选、workflow 级（`spec.parallelism`），不写 = Argo 默认不限（不替用户做主）；
+- 非法值（0 / 负数 / 字符串 / bool / 小数）与拼错键名全部报错，不允许"配了没生效"。
+
+**CLI 错误呈现**：`SpecError` 是"你写的东西不对"，不是"跑挂了"，两者必须从退出码上分开：
+
+- spec / 版本 / 文件不存在 → **退出码 2** + 一行可行动 stderr（不再吐 20 行 traceback）；
+- 管线跑失败 / 对账不过 / 检查不过 → **退出码 1**（沿用原语义）；
+- 顺带修掉统一入口的 P0：`main()` 不接受参数而 `cli.main` 传了参数，导致
+  `specargo run x.yaml` 直接 `TypeError`；现在各 `main(argv=None)` 都接受 argv，
+  `specargo gate --help` 也能透传到 gate 自己的解析器。
+
+回归：`tests/test_cli_errors.py`（8 例，子进程级）+ `tests/test_parallelism.py`（7 例）。
+
 ### 3. `StateStore` 协议 + 集群 resume（已完成）
 
 - `state.py` 拆出 `StateStore` 协议 + `SqliteStateStore` / `JournalStateStore` 两个实现
@@ -150,7 +171,8 @@ spec 不只是配置，它是**给别人写的契约**：没有版本号时，"�
 
 ## 扩展验证
 
-`partitions: {from: range, start: 1, end: 200}` 跑一轮，观测：
+`partitions: {from: range, start: 1, end: 200}` 跑一轮（**先设 `runtime.parallelism`**，
+否则测到的是 pod storm 而不是吞吐），观测：
 - workflow-controller 的队列深度与 API server QPS
 - Pod 调度延迟、`parallelism` 上限
 - 对象存储吞吐（当前 moto 是进程内实现，需换真 MinIO 才能测）
