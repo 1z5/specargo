@@ -5,9 +5,9 @@
 > 只能由设计或代码推断、但没有实测证据的，一律写进"未验证"。
 > 计划与取舍见 [`ROADMAP.md`](ROADMAP.md)，架构与模块边界见 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
 
-**快照**：基线提交 `8b31fa1`（`main`，本地 == `origin/main`，YAML 错误统一出口 + 文档矛盾修正那次），
-文档状态更新于 2026-11-04。该提交的 CI：`unit-tests` 41632909172（success）、
-`k8s-smoke` 41632909034（success）。
+**快照**：基线提交 `e8ce15c`（`main`，本地 == `origin/main`，收口：文档矛盾修正 + 文档数字守卫），
+文档状态更新于 2026-11-04。该提交的 CI：`unit-tests` 41840935533（success）、
+`k8s-smoke` 41840935534（success）。
 
 ---
 
@@ -41,6 +41,8 @@
 | `tests/test_template.py` | 5 | `--as-template` / `--reference` 编译形态与引用最小 Workflow |
 | `examples/tts-asr/tests/test_tts_state.py` | 4 | 书籍口径 ↔ 通用状态表映射、领域对账、重复产物检测（不装 openai / faster-whisper） |
 
+表格与总数由 `tests/test_docs_numbers.py` 强制校验：加一套用例忘了更新文档，本套件直接失败。
+
 复现（零外部依赖，约 1 分钟）：
 
 ```bash
@@ -65,9 +67,9 @@ etl-demo  ：specargo-run 首跑 汇总 verified=9，对账 ok=True
 
 ### 2.4 真实集群（kind 1 控制面 + 2 worker + Argo Workflows v3.7.18，CI 每次 push 自动验）
 
-最近一次代码提交 `8b31fa1`（YAML 错误统一出口 + 文档矛盾修正）的两个 job 均 success：
-`unit-tests` 41632909172、`k8s-smoke` 41632909034——真集群零退化（31/31 Pod、onExit 1/1、
-对账 PASS、15 状态对象、模板展开 31 节点）。
+最近一次代码提交 `e8ce15c`（收口）的两个 job 均 success：`unit-tests` 41840935533、
+`k8s-smoke` 41840935534——真集群零退化（31/31 Pod、onExit 1/1、对账 PASS、15 状态对象、
+模板展开 31 节点）。
 
 主工作流（`spec2argo` 编译产物直接提交）：
 
@@ -145,8 +147,9 @@ WorkflowTemplate 版本化：`--as-template` 产出模板 → `--reference` 引�
    补"千级 Pod 未实测"这一条；注意先设并发上限，否则测到的是 pod storm 而不是吞吐。
 3. **service job 记录落库**（本地可验）：补 `service_job` 表或复用 `state.py`，让重启后可查可重试。
 4. **WorkflowTemplate + `when` 省 Pod 的 resume**（需要真集群验证）：把"task 内跳过"升级为"不拉 Pod"。
-5. **文档数字自检**（极低成本）：把"测试例数"从 8 处手写数字变成一条自动断言，
-   避免每次加用例都要改 8 个地方、且漏改无人发现。
+
+> ✅ 原第 5 条"文档数字自检"已落地：`tests/test_docs_numbers.py` 强制 8 处文档数字与真实用例数一致，
+> 漏改即红；它上线当天就抓到 README 两处过期例数与两个从未在 README 出现的套件。
 
 ## 7. 复现与 CI 触发规则
 
