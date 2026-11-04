@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import _bootstrap  # noqa: F401  (把仓库 app/ 加入 sys.path)
+import _bootstrap  # noqa: F401  (把仓库 src/ 加入 sys.path，供脚本方式运行)
 
 from models import Book
 from specargo.state import VERIFIED, items_for, upsert_item

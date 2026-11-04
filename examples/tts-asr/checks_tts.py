@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-import _bootstrap  # noqa: F401  (把仓库 app/ 加入 sys.path)
+import _bootstrap  # noqa: F401  (把仓库 src/ 加入 sys.path，供脚本方式运行)
 
 from pathlib import Path
 

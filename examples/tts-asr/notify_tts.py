@@ -8,7 +8,7 @@ onExit 无论上游成败都执行，所以这里是"绿着但少数据"与"真�
 """
 from __future__ import annotations
 
-import _bootstrap  # noqa: F401  (把仓库 app/ 加入 sys.path)
+import _bootstrap  # noqa: F401  (把仓库 src/ 加入 sys.path，供脚本方式运行)
 
 import argparse
 import json
