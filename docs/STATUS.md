@@ -5,9 +5,11 @@
 > 只能由设计或代码推断、但没有实测证据的，一律写进"未验证"。
 > 计划与取舍见 [`ROADMAP.md`](ROADMAP.md)，架构与模块边界见 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
 
-**快照**：基线提交 `e8ce15c`（`main`，本地 == `origin/main`，收口：文档矛盾修正 + 文档数字守卫），
-文档状态更新于 2026-11-04。该提交的 CI：`unit-tests` 41840935533（success）、
-`k8s-smoke` 41840935534（success）。
+**快照**：基线提交 `31da39b`（`main`，本地 == `origin/main`，状态日志规模/并发真实 HTTP 实测），
+文档状态更新于 2026-11-04。该提交的 CI：`unit-tests` 41856027612（success，含新增的
+`test_journal_scale.py`）；`k8s-smoke` **未触发**——它只改了 tests/ docs/ ci/ 与
+`unit-tests.yml`，不在 k8s-smoke 的 `paths:` 过滤范围内；最近一次 k8s-smoke 为
+`e8ce15c` 的 41840935534（success）。
 
 ---
 
@@ -85,9 +87,10 @@ etl-demo  ：specargo-run 首跑 汇总 verified=9，对账 ok=True
 
 ### 2.4 真实集群（kind 1 控制面 + 2 worker + Argo Workflows v3.7.18，CI 每次 push 自动验）
 
-最近一次代码提交 `e8ce15c`（收口）的两个 job 均 success：`unit-tests` 41840935533、
-`k8s-smoke` 41840935534——真集群零退化（31/31 Pod、onExit 1/1、对账 PASS、15 状态对象、
-模板展开 31 节点）。
+最近一次**改了集群侧代码**（src/ pipelines/ k8s/）的提交是 `e8ce15c`：`k8s-smoke`
+41840935534 success——真集群零退化（31/31 Pod、onExit 1/1、对账 PASS、15 状态对象、
+模板展开 31 节点）。其后的提交只动 tests/ docs/ ci/（`31da39b` 等），按 `paths:` 过滤
+不触发 k8s-smoke，`unit-tests` 41856027612 success。
 
 主工作流（`spec2argo` 编译产物直接提交）：
 
