@@ -266,7 +266,12 @@ onExit     ─► pipeline_cli.py reconcile-journal（同一 evaluate_items 判�
 ```
 
 > 手写版 `k8s/workflow-etl-smoke.yaml` 是早期实现，已降级为对照参考。
-> 集群侧断点续跑（skip）未实现：状态日志当前只用于 onExit 对账，不作为 resume 依据。
+> 集群侧断点续跑**已实现（task 级）**：`k8s.resume: true` 时每个 stage 前插
+> `state check-skip`（读**同一份**状态日志，判定用与本地 runner 同一份 `resume_policy`），
+> 已到成功终态则 exit 0 跳过；CI 4.6 有真集群冒烟（删除 workflow 后同名重提，断言所有
+> stage 打印「[resume] 已完成，跳过」）。**注意两点**：①跳过发生在 task 内部，Pod 仍会被
+> 调度，「不拉 Pod」形态需 WorkflowTemplate + `when`（未做）；②前提是 run_id 稳定
+>（固定 workflow 名，续跑前先删同名 workflow，否则 Argo 的 AlreadyExists 会挡住重提）。
 
 ---
 
@@ -323,7 +328,7 @@ docker build -t specargo:ci .        # 构建上下文为仓库根
 - **参数注入**：参数值按文本替换进命令，shell 元字符会被目标 shell 二次解释；含此类字符需在 spec 内自行引号 / 转义。
 - **gate 执行**：已改为调用 `pipeline_cli.py gate`（不再内嵌 Python 源码），行为可在本地单测；
   集群 gate 仍只支持单文件 artifact。
-- **集群状态**：状态日志依赖对象存储；SQLite 状态表只用于本地。多写者场景未提供 `StateStore` 协议，集群侧断点续跑未实现。
+- **集群状态**：状态日志依赖对象存储；SQLite 状态表只用于本地。多写者场景由 `JournalStateStore` 承担（key 独立、并发安全）；task 级断点续跑已实现（`k8s.resume` + `state check-skip`，Pod 仍会被调度）。
 - **本地 vs 集群顺序**：local runner 按依赖拓扑排序，不要求 YAML 书写顺序；编译到 Argo 由 DAG dependencies 保证。
 - **安全边界**：onExit 对账信任对象存储状态对象（部署侧应限制 bucket 写入权限，防止伪造 verified）；
   `notify_webhook` 仅支持 http/https；`k8s.objstore_env` 不可覆盖框架保留 env；
