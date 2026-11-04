@@ -60,7 +60,26 @@ for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 - spec 契约版本：加载期强制（缺省=当前版本、高版本拒绝、旧版本走迁移链并可见告警），
   编译产物带 `specargo.dev/spec-version` 注解——版本信息活到线上，而不只停在文档里。
 
-### 2.5 状态日志的规模与并发（真实 S3 HTTP，2026-11-04 实测）
+### 2.3 真集群规模冒烟（本地 kind，2026-11-04 实测）
+
+环境：kind 3 节点（colima VM 6 核 / 8 GB）+ Argo Workflows v3.7.18 + 单副本 moto
+对象存储 + 框架镜像 `specargo:ci`。变体：`etl-demo` + 200 分区 + `parallelism: 20`
++ `journal: true` + `resume: true`（`pod_gc_strategy: ''` 以便断言）。
+
+| 指标 | 实测 |
+|---|---|
+| 最终状态 / onExit 对账 | Succeeded / **PASS**（expected=200、verified=200、missing=0） |
+| 墙钟 | 1466s（1202 个 Pod，平均 0.8 Pod/s） |
+| 峰值并发 Pod | **20 == parallelism 设定**（时间戳口径与实时采样双口径印证） |
+| 状态日志对象数 | 600 = 3 stage × 200（+1 分区清单；run 前缀共 1201） |
+| 集群内对象存储 GET RTT | p50 1.7ms / p95 4.2ms / max 11.1ms（moto 单副本，200 次） |
+| 保留的 Pod 对象 | 1233（`pod_gc_strategy: ''` 的规模代价，别当默认） |
+
+复现：`ci/local_scale_smoke.sh up && ci/local_scale_smoke.sh scale 200 20`。
+口径纪律：并发必须数**非终态** Pod；按 namespace 全部 Pod 数会把保留的已完成 Pod
+算成并发（200 分区时量出 1236 这种累计值），结论会写反。
+
+### 2.4 状态日志的规模与并发（真实 S3 HTTP，2026-11-04 实测）
 
 `ci/scale_probe.py` + `tests/test_journal_scale.py`（CI 常驻）。端点是本机 moto server
 （真实 TCP/HTTP + boto3 序列化，与生产的差别只是 RTT 量级），8 线程并发写各自 key：
@@ -77,7 +96,7 @@ for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 - 口径纪律：本地文件系统（1000 分区写 0.7s / 读 0.18s）与真实 HTTP 是两套数字，
   README 两处都标了口径，不混读
 
-### 2.3 本地 E2E（从 `pip install -e .` 后的新路径实测）
+### 2.5 本地 E2E（从 `pip install -e .` 后的新路径实测）
 
 ```
 dataset 链路：seed 25 条 → clean 21 合格 / 4 隔离（去重 2）→ 2 片 + manifest 自校验通过 → manifest verify PASS
@@ -85,7 +104,7 @@ etl-demo  ：specargo-run 首跑 汇总 verified=9，对账 ok=True
              第二次跑 汇总 skipped=9（断点续跑全部命中）
 ```
 
-### 2.4 真实集群（kind 1 控制面 + 2 worker + Argo Workflows v3.7.18，CI 每次 push 自动验）
+### 2.6 真实集群（kind 1 控制面 + 2 worker + Argo Workflows v3.7.18，CI 每次 push 自动验）
 
 最近一次**改了集群侧代码**（src/ pipelines/ k8s/）的提交是 `e8ce15c`：`k8s-smoke`
 41840935534 success——真集群零退化（31/31 Pod、onExit 1/1、对账 PASS、15 状态对象、
@@ -115,7 +134,7 @@ onExit 节点成功数: 1/1
 所有 stage 打印 `[resume] 已完成，跳过`（CI 断言）。
 WorkflowTemplate 版本化：`--as-template` 产出模板 → `--reference` 引用 → 真集群 Succeeded 且节点由模板展开。
 
-### 2.5 规模与性能（本地实测，`tests/test_scale.py`）
+### 2.7 规模与性能（本地实测，`tests/test_scale.py`）
 
 1000 分区 × 3 stage = 3000 个状态对象：
 
@@ -144,11 +163,11 @@ WorkflowTemplate 版本化：`--as-template` 产出模板 → `--reference` 引�
 
 - **生产级对象存储**：当前集群冒烟用进程内 moto 自建 S3 端点，MinIO / OSS / S3 的真实吞吐、
   网络往返量级与成本未测；2.5 的规模数字是本地文件系统上的结论。
-- **千级 Pod / 万级分区（编排侧）**：已有 `runtime.parallelism` 这道闸，但 controller 限流、
-  API server QPS、Pod 调度延迟的真实曲线仍未观测（本机无 docker/kind/argo，跑不了真集群；
-  `partitions: {from: range, end: 200}` + 显式 `parallelism` 一轮即可开始，见 ROADMAP）。
+- **千级 Pod / 万级分区（编排侧）**：`parallelism` 的限流效果已在本地 kind 3 节点 +
+  200 分区上实测（峰值并发 == 设定值 20，见 §2.3）；未测的是千级分区规模、controller
+  限流/积压曲线、API server QPS，以及多副本 controller/对象存储的 HA 形态。
 - **对象存储侧已测、但仅限本机端点**：状态日志的规模/并发/成本曲线已在真实 S3 HTTP 上实测
-  （见 §2.5），但端点是本机 moto server，RTT 是 localhost 量级；换真 MinIO/OSS/S3 后的
+  （见 §2.4），但端点是本机 moto server，RTT 是 localhost 量级；换真 MinIO/OSS/S3 后的
   往返量级只能按每次 GET 的 RTT 线性放大推断，**未实测**。
 - **多副本高可用**：object-store / workflow-controller 均单副本；ReadWriteMany PVC 未验证（当前用对象存储绕开）。
 - **gRPC 服务形态**：当前只有 HTTP。
@@ -168,7 +187,7 @@ WorkflowTemplate 版本化：`--as-template` 产出模板 → `--reference` 引�
 
 1. **失败注入测试**（可离线 + 现有模拟集群完成，成本最低、收益直接）：把第 4 节最后一条链路固化。
 2. **真集群上跑一轮 200 分区 + 显式 `parallelism`**（需要集群配额）：对象存储侧的成本曲线
-   已在真实 HTTP 上量到（§2.5），缺的是编排侧——controller 队列深度、API QPS、Pod 调度
+   已在真实 HTTP 上量到（§2.4），缺的是编排侧——controller 队列深度、API QPS、Pod 调度
    延迟与 `parallelism` 的实际限流效果；注意先设并发上限，否则测到的是 pod storm 而不是吞吐。
 3. **service job 记录落库**（本地可验）：补 `service_job` 表或复用 `state.py`，让重启后可查可重试。
 4. **WorkflowTemplate + `when` 省 Pod 的 resume**（需要真集群验证）：把"task 内跳过"升级为"不拉 Pod"。

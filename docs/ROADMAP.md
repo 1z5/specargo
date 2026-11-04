@@ -209,12 +209,30 @@ spec 不只是配置，它是**给别人写的契约**：没有版本号时，"�
 计算，与 N 无关。`unit-tests` CI 从此安装 boto3 + moto[server]——S3 路径此前只在
 k8s-smoke 的集群里被覆盖，离线套件里一次都没跑过。
 
-**仍缺（需要真集群，本机没有 docker/kind/argo）**：
-- `partitions: {from: range, start: 1, end: 200}` 真跑一轮，观测 controller 队列深度、
-  API server QPS、Pod 调度延迟与 `runtime.parallelism` 的实际限流效果
-  （注意先设 parallelism，否则测到的是 pod storm 而不是吞吐）；
-- 对象存储换真 MinIO/OSS/S3 后的 RTT（上表是 localhost 量级，按每次 GET 的实际
-  RTT 线性放大属推断，未实测）。
+**仍缺**：
+- 对象存储换真 MinIO/OSS/S3 后的 RTT（本地 kind 实测 p50 1.7ms，是单副本 moto +
+  集群内 Service 的量级；按每次 GET 的实际 RTT 线性放大属推断，未实测）；
+- 更大规模（千级分区）与多副本 controller/对象存储的高可用形态。
+
+### 2.2 真集群规模冒烟（已完成，2026-11-04，本地 kind）
+
+环境：kind 3 节点（colima VM 6 核 / 8 GB）+ Argo v3.7.18 + 单副本 moto 对象存储。
+变体：`etl-demo` + 200 分区 + `parallelism: 20` + `journal: true` + `resume: true`。
+
+| 指标 | 实测 |
+|---|---|
+| 最终状态 / onExit 对账 | Succeeded / **PASS**（200/200、missing=0） |
+| 墙钟 | 1466s（1202 个 Pod，0.8 Pod/s） |
+| 峰值并发 Pod | **20 = parallelism 设定**（限流精确生效） |
+| 状态日志对象数 | 600 = 3 stage × 200（+1 分区清单） |
+| 集群内 GET RTT | p50 1.7ms / p95 4.2ms / max 11.1ms |
+| 保留的 Pod 对象 | 1233（`pod_gc_strategy: ''` 的代价） |
+
+复现脚本 `ci/local_scale_smoke.sh`（up → scale 200 20）。踩到并记在两个口径坑：
+①kind 的 `load docker-image` 对多架构镜像报 `ctr: content digest not found`，
+改用 `docker save | docker exec <node> ctr -n k8s.io images import -`；
+②并发采样必须数**非终态** Pod——按 namespace 全部 Pod 数会把 `pod_gc_strategy: ''`
+保留的已完成 Pod 算成并发，200 分区时量出 1236 这种累计值，结论会写反。
 
 ### 3. 失败注入测试
 

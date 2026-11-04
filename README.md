@@ -337,6 +337,35 @@ PASS/FAIL 传播全部实测通过（bucket 总计 46 个对象 = 15 产物 + 15
 | **重试分层** | extract `limit 2 / OnTransientError`；transform、load `limit 0`；gate 同样 `limit 0` | 语义按失败类型区分（编译产物里没有独立的 `validate` 阶段） |
 | **onExit 收口（可选）** | `k8s.journal: true` 的 spec 编译后生成 `onExit`：从对象存储状态日志对账，差异非空则工作流失败；成功路径缺分区清单也失败 | **真实集群 CI 验证**：journal 工作流 Succeeded、onExit 节点 1/1、日志「对账结果: PASS」、15 个状态对象 + 分区清单落盘 |
 
+### 真集群规模实测（本地 kind，2026-11-04）
+
+环境：kind 3 节点（1 控制面 + 2 worker，跑在 colima VM 上：6 核 / 8 GB）、Argo Workflows
+v3.7.18、对象存储为单副本 moto server、框架镜像 `specargo:ci`。变体：
+`pipelines/etl-demo.yaml` + 200 分区 + `parallelism: 20` + `journal: true` + `resume: true`
+（`pod_gc_strategy: ''` 以便断言）。
+
+| 指标 | 实测 |
+|---|---|
+| 工作流最终状态 | **Succeeded** |
+| onExit 对账 | **PASS**：expected=200 / verified=200 / missing=0 / not_verified=0 |
+| 墙钟耗时 | **1466s**（1202 个 Pod，平均 0.8 Pod/s） |
+| 峰值并发 Pod | **20 = parallelism 设定**（限流精确生效；并发曲线呈锯齿，符合 stage 依赖） |
+| 状态日志对象数 | **600 = 3 stage × 200**（+1 分区清单；run 前缀共 1201 个对象） |
+| 集群内对象存储 GET RTT | **p50 1.7ms / p95 4.2ms / max 11.1ms**（200 次实测，moto 单副本） |
+| 保留的 Pod 对象 | 1233 个（`pod_gc_strategy: ''` 的代价，见下） |
+
+两条从这次实测里学到的：
+
+1. **`parallelism` 真的限流**，峰值并发与设定值一致——扇出管线不再一次性把 N×M 个 Pod
+   请求砸向 controller。
+2. **`pod_gc_strategy: ''`（保留 Pod 便于断言）在规模下有代价**：200 分区跑完，
+   namespace 里留下 1233 个已完成 Pod 对象。断言用可以，别当默认值；生产上保留
+   默认的 `OnWorkflowSuccess`。
+
+复现：`ci/local_scale_smoke.sh up && ci/local_scale_smoke.sh scale 200 20`
+（注意：该脚本的并发采样必须数**非终态** Pod，按"namespace 全部 Pod"数会把
+`pod_gc_strategy: ''` 保留的已完成 Pod 算成并发，量出 1236 这种累计值——脚本里有注释）。
+
 **仍未实测**：千级 Pod 规模的 controller 限流与积压、ReadWriteMany PVC、
 生产级 MinIO/OSS 的真实吞吐、多副本高可用、gRPC 服务形态。
 （上表的 HTTP 数字来自本机 moto server：往返是 localhost 量级；换真 MinIO/OSS 时
