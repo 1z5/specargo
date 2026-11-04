@@ -27,11 +27,14 @@ jobs:
 
       # 只装框架层依赖：测试不需要领域示例的重依赖（openai / faster-whisper 等，
       # 它们都在 examples/ 下且导入是延迟的）
+      # boto3 + moto[server]：tests/test_journal_scale.py 要起一个**真实 HTTP** 的
+      # S3 兼容端点来验证状态日志的规模/并发——此前 S3 路径只在 k8s-smoke 的集群里
+      # 被覆盖，离线套件里完全没有（"CI 不装 boto3"曾是注释里的原话）。
       - name: 安装依赖
         run: |
           set -e
           python3 -m pip install --upgrade pip
-          python3 -m pip install "PyYAML>=6.0"
+          python3 -m pip install "PyYAML>=6.0" "boto3>=1.28" "moto[server]"
           # 包化后以 editable install 验证「pip install 可用」这条属性
           python3 -m pip install -e .
           python3 -c "import specargo; print('specargo', specargo.__version__)"

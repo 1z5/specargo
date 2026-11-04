@@ -44,7 +44,7 @@
 | 10 | 自动生成的 objstore `--file` 未加引号（路径含空格失败）；gate 未声明 dataset/variant 输入 | 路径统一 `shlex.quote`；gate inputs/args 补齐三个维度 |
 | 11 | 文档与实际不符（死命令 / 数字 / 夸大） | README / ARCHITECTURE / ROADMAP 按实测证据校正 |
 
-新增回归：`tests/test_p0_regressions.py`；离线套件合计 **167 例**（框架 163 + 领域示例 4），全部通过。
+新增回归：`tests/test_p0_regressions.py`；离线套件合计 **172 例**（框架 168 + 领域示例 4），全部通过。
 验证方式：本地四套件 + ETL / dataset 管线 E2E + 编译产物零残留 + 独立 Argo 模拟器
 （每个 task-item 独立目录、只共享对象存储）跑通 etl-demo 与 dataset-build 的编译产物；
 真实集群侧由 CI 的 kind smoke 继续验证。
@@ -192,13 +192,29 @@ spec 不只是配置，它是**给别人写的契约**：没有版本号时，"�
 
 ## 扩展验证
 
-`partitions: {from: range, start: 1, end: 200}` 跑一轮（**先设 `runtime.parallelism`**，
-否则测到的是 pod storm 而不是吞吐），观测：
-- workflow-controller 的队列深度与 API server QPS
-- Pod 调度延迟、`parallelism` 上限
-- 对象存储吞吐（当前 moto 是进程内实现，需换真 MinIO 才能测）
+### 2.1 状态日志的规模/并发（已完成，2026-11-04）
 
-产出数据写进 README，补上"千级 Pod 未实测"这一条。
+`ci/scale_probe.py`（非 CI，手工跑）+ `tests/test_journal_scale.py`（CI 常驻，5 例）。
+后者起一个**真实 HTTP 的 S3 兼容端点**（moto server + boto3，走完整网络栈），
+断言规模与并发的四条不变量；前者在 200/500/1000 分区上量出成本曲线，已写进 README：
+
+| 分区数 N | 状态对象数 | 写入（8 并发） | 末 stage 直读 | 全量读（旧路径） | 倍数 |
+|---|---|---|---|---|---|
+| 200 | 600 | 2.58s | 1.15s | 3.52s | 3.1× |
+| 500 | 1500 | 6.74s | 2.95s | 8.94s | 3.0× |
+| 1000 | 3000 | 13.86s | 6.02s | 18.19s | 3.0× |
+
+结论：**对象数 = stage×分区 + 1 个分区清单**（规模上限由这个公式决定，key 不重复，
+所以并发写不丢不覆，8 线程实测无丢失）；直读确实把往返降到 1/3；对账判定是纯内存
+计算，与 N 无关。`unit-tests` CI 从此安装 boto3 + moto[server]——S3 路径此前只在
+k8s-smoke 的集群里被覆盖，离线套件里一次都没跑过。
+
+**仍缺（需要真集群，本机没有 docker/kind/argo）**：
+- `partitions: {from: range, start: 1, end: 200}` 真跑一轮，观测 controller 队列深度、
+  API server QPS、Pod 调度延迟与 `runtime.parallelism` 的实际限流效果
+  （注意先设 parallelism，否则测到的是 pod storm 而不是吞吐）；
+- 对象存储换真 MinIO/OSS/S3 后的 RTT（上表是 localhost 量级，按每次 GET 的实际
+  RTT 线性放大属推断，未实测）。
 
 ### 3. 失败注入测试
 

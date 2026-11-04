@@ -14,14 +14,14 @@
 ## 1. 一句话结论
 
 框架层（spec 解析 → 本地 runner / Argo 编译器 → 质量闸门 → 状态登记 → 对账）功能闭环，
-**167 个离线用例 + 本地 E2E + kind 真实集群 E2E 三侧都有实测证据**；
+**172 个离线用例 + 本地 E2E + kind 真实集群 E2E 三侧都有实测证据**；
 剩下的缺口集中在"生产级环境的非功能性验证"（真对象存储吞吐、千级 Pod、多副本 HA）
 和两类未映射的 Argo 特性（script 型 template、synchronization/suspend，外加「不拉 Pod」
 形态的集群 skip——当前 `k8s.resume` 已是 task 级跳过并真集群验证过）。
 
 ## 2. 已验证
 
-### 2.1 离线套件：167 例全绿（框架 163 + 领域示例 4）
+### 2.1 离线套件：172 例全绿（框架 168 + 领域示例 4）
 
 | 套件 | 例数 | 覆盖要点 |
 |---|---|---|
@@ -33,6 +33,7 @@
 | `tests/test_resume_state.py` | 8 | 指纹跳过与输入变化、输出缺失重生成、item 状态幂等 upsert、对账漏数 / 未过检、旧库 schema 自动迁移 |
 | `tests/test_state_store.py` | 9 | `StateStore` 协议下两个实现的 item / run 读写语义一致 |
 | `tests/test_scale.py` | 7 | 千级分区规模与耗时上界、直读 == 全量读（含损坏状态记录的分类一致性）、GET 次数硬断言、check-skip O(1) |
+| `tests/test_journal_scale.py` | 5 | 状态日志规模/并发（真实 S3 HTTP）：对象数 = stage×分区 + 1 分区清单、末 stage 直读 GET == N 且 LIST 0 次、全量读 = LIST 1 + 3N GET、8 线程并发写不丢不覆、缺末 stage 状态算"漏数" |
 | `tests/test_cli_errors.py` | 11 | CLI 契约：spec 写错 → 退出码 2 + 一行提示（无 traceback）、管线跑挂 → 退出码 1、统一入口 `specargo <cmd>` 可用、子命令 `--help` 透传、未知命令拒绝、**YAML 语法错误 → 一行提示 + 退出码 2（三个入口均无 traceback）** |
 | `tests/test_docs_numbers.py` | 3 | 文档数字守卫：每个套件的例数与 README / STATUS 表格一致，总例数与 README 4 处 + ROADMAP 1 处 + STATUS 2 处一致——漏改文档即本套件失败 |
 | `tests/test_parallelism.py` | 7 | 扇出并发上限：默认不写、`runtime.parallelism` 落到 `spec.parallelism`、旧名 `k8s:` 同样生效、`--runtime` 覆盖、模板携带、非法值与拼错键名拒绝 |
@@ -56,6 +57,23 @@ for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 - 框架纯净度守卫：`src/` 内无领域词泄漏（CI 同一条 grep，仅 `envcompat.py` / `legacy_state_migration.py` 例外）。
 - spec 契约版本：加载期强制（缺省=当前版本、高版本拒绝、旧版本走迁移链并可见告警），
   编译产物带 `specargo.dev/spec-version` 注解——版本信息活到线上，而不只停在文档里。
+
+### 2.5 状态日志的规模与并发（真实 S3 HTTP，2026-11-04 实测）
+
+`ci/scale_probe.py` + `tests/test_journal_scale.py`（CI 常驻）。端点是本机 moto server
+（真实 TCP/HTTP + boto3 序列化，与生产的差别只是 RTT 量级），8 线程并发写各自 key：
+
+| 分区数 N | 状态对象数 | 写入(8 并发) | 末 stage 直读 | 全量读(旧路径) | 倍数 |
+|---|---|---|---|---|---|
+| 200 | 600 | 2.58s | 1.15s | 3.52s | 3.1× |
+| 500 | 1500 | 6.74s | 2.95s | 8.94s | 3.0× |
+| 1000 | 3000 | 13.86s | 6.02s | 18.19s | 3.0× |
+
+- **对象数 = stage × 分区 + 1 个分区清单**（规模上限公式；key 独立 → 并发安全，实测无丢失）
+- 末 stage 直读：GET == N、LIST == 0；全量读：LIST 1 + 3N GET（3.0× 差距的硬证据）
+- 对账判定（`evaluate_items`）是纯内存计算，与 N 无关
+- 口径纪律：本地文件系统（1000 分区写 0.7s / 读 0.18s）与真实 HTTP 是两套数字，
+  README 两处都标了口径，不混读
 
 ### 2.3 本地 E2E（从 `pip install -e .` 后的新路径实测）
 
@@ -123,9 +141,12 @@ WorkflowTemplate 版本化：`--as-template` 产出模板 → `--reference` 引�
 
 - **生产级对象存储**：当前集群冒烟用进程内 moto 自建 S3 端点，MinIO / OSS / S3 的真实吞吐、
   网络往返量级与成本未测；2.5 的规模数字是本地文件系统上的结论。
-- **千级 Pod / 万级分区**：已有 `runtime.parallelism` 这道闸（workflow 级并发上限，默认不限），
-  但 controller 限流、API server QPS、调度延迟的真实曲线仍未观测
-  （`partitions: {from: range, end: 200}` + 显式 `parallelism` 一轮即可开始，见 ROADMAP「扩展验证」）。
+- **千级 Pod / 万级分区（编排侧）**：已有 `runtime.parallelism` 这道闸，但 controller 限流、
+  API server QPS、Pod 调度延迟的真实曲线仍未观测（本机无 docker/kind/argo，跑不了真集群；
+  `partitions: {from: range, end: 200}` + 显式 `parallelism` 一轮即可开始，见 ROADMAP）。
+- **对象存储侧已测、但仅限本机端点**：状态日志的规模/并发/成本曲线已在真实 S3 HTTP 上实测
+  （见 §2.5），但端点是本机 moto server，RTT 是 localhost 量级；换真 MinIO/OSS/S3 后的
+  往返量级只能按每次 GET 的 RTT 线性放大推断，**未实测**。
 - **多副本高可用**：object-store / workflow-controller 均单副本；ReadWriteMany PVC 未验证（当前用对象存储绕开）。
 - **gRPC 服务形态**：当前只有 HTTP。
 - **失败注入**：故意让某分区 gate 失败，验证"下游依赖跳过 → 对账报 missing → 退出码非 0 →
@@ -143,8 +164,9 @@ WorkflowTemplate 版本化：`--as-template` 产出模板 → `--reference` 引�
 ## 6. 下一步候选（按价值 / 风险排序）
 
 1. **失败注入测试**（可离线 + 现有模拟集群完成，成本最低、收益直接）：把第 4 节最后一条链路固化。
-2. **扩展验证一轮 200 分区 + 显式 `parallelism`**（需要集群配额，产出数据回填 README）：
-   补"千级 Pod 未实测"这一条；注意先设并发上限，否则测到的是 pod storm 而不是吞吐。
+2. **真集群上跑一轮 200 分区 + 显式 `parallelism`**（需要集群配额）：对象存储侧的成本曲线
+   已在真实 HTTP 上量到（§2.5），缺的是编排侧——controller 队列深度、API QPS、Pod 调度
+   延迟与 `parallelism` 的实际限流效果；注意先设并发上限，否则测到的是 pod storm 而不是吞吐。
 3. **service job 记录落库**（本地可验）：补 `service_job` 表或复用 `state.py`，让重启后可查可重试。
 4. **WorkflowTemplate + `when` 省 Pod 的 resume**（需要真集群验证）：把"task 内跳过"升级为"不拉 Pod"。
 
