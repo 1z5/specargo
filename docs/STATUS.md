@@ -8,8 +8,11 @@
 **快照**：基线提交 `d97cc3b`（`main`，本地 == `origin/main`，**v0.1.0 可交付版本**，
 tag `v0.1.0` 已推送），文档状态更新于 2026-11-05。该提交的 CI：`unit-tests` 41949678112
 （success）、`k8s-smoke` 41949678129（success）。
-其后的 `docs/` + `tests/` 提交（文档/清单一致性守卫）不触发 `k8s-smoke`（paths 过滤），
-`unit-tests` 单独验证。
+其后的 `docs/` + `tests/` 提交（`6627401`，文档/清单一致性守卫 + 三处部署文档修正）
+不触发 `k8s-smoke`（paths 过滤），`unit-tests` 41951427044（success）单独验证。
+该提交同时按 DEPLOYMENT §4/§5 的原文实测：`specargo-compile --runtime` + `argo lint`
+（真集群 Argo v3.7.18）通过，产物带 `serviceAccountName: argo-workflow`、
+`parallelism: 20`、`onExit`、`activeDeadlineSeconds: 7200`。
 
 ---
 
