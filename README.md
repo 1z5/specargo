@@ -99,7 +99,10 @@ YAML spec ─► spec.py 解析/校验 ─► runner.py 本地执行 ─► chec
 依赖：Python 3.11+。框架层只需要 PyYAML（示例的重依赖在各自 `examples/*/requirements.txt`）。
 
 ```bash
-python3 -m pip install -r requirements.txt
+# 0) 安装框架本身（必须）：`pip install -e .` 会装 PyYAML 依赖，并提供
+#    specargo / specargo-run / specargo-compile / specargo-gate / specargo-service 五个入口。
+#    只装 requirements.txt 的话，`python3 -m specargo...` 会 ModuleNotFoundError。
+python3 -m pip install -e .
 
 # 1) 数据集构建链路：seed → clean → shard → manifest（零外部依赖）
 python3 -m specargo.examples.dataset_steps seed  --partition 1 --out out/raw/1.jsonl
