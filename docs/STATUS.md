@@ -5,25 +5,25 @@
 > 只能由设计或代码推断、但没有实测证据的，一律写进"未验证"。
 > 计划与取舍见 [`ROADMAP.md`](ROADMAP.md)，架构与模块边界见 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
 
-**快照**：基线提交 `31da39b`（`main`，本地 == `origin/main`，状态日志规模/并发真实 HTTP 实测），
-文档状态更新于 2026-11-04。该提交的 CI：`unit-tests` 41856027612（success，含新增的
-`test_journal_scale.py`）；`k8s-smoke` **未触发**——它只改了 tests/ docs/ ci/ 与
-`unit-tests.yml`，不在 k8s-smoke 的 `paths:` 过滤范围内；最近一次 k8s-smoke 为
-`e8ce15c` 的 41840935534（success）。
+**快照**：基线提交 `d97cc3b`（`main`，本地 == `origin/main`，**v0.1.0 可交付版本**，
+tag `v0.1.0` 已推送），文档状态更新于 2026-11-05。该提交的 CI：`unit-tests` 41949678112
+（success）、`k8s-smoke` 41949678129（success）。
+其后的 `docs/` + `tests/` 提交（文档/清单一致性守卫）不触发 `k8s-smoke`（paths 过滤），
+`unit-tests` 单独验证。
 
 ---
 
 ## 1. 一句话结论
 
 框架层（spec 解析 → 本地 runner / Argo 编译器 → 质量闸门 → 状态登记 → 对账）功能闭环，
-**172 个离线用例 + 本地 E2E + kind 真实集群 E2E 三侧都有实测证据**；
+**176 个离线用例 + 本地 E2E + kind 真实集群 E2E 三侧都有实测证据**；
 剩下的缺口集中在"生产级环境的非功能性验证"（真对象存储吞吐、千级 Pod、多副本 HA）
 和两类未映射的 Argo 特性（script 型 template、synchronization/suspend，外加「不拉 Pod」
 形态的集群 skip——当前 `k8s.resume` 已是 task 级跳过并真集群验证过）。
 
 ## 2. 已验证
 
-### 2.1 离线套件：172 例全绿（框架 168 + 领域示例 4）
+### 2.1 离线套件：176 例全绿（框架 172 + 领域示例 4）
 
 | 套件 | 例数 | 覆盖要点 |
 |---|---|---|
@@ -37,6 +37,7 @@
 | `tests/test_scale.py` | 7 | 千级分区规模与耗时上界、直读 == 全量读（含损坏状态记录的分类一致性）、GET 次数硬断言、check-skip O(1) |
 | `tests/test_journal_scale.py` | 5 | 状态日志规模/并发（真实 S3 HTTP）：对象数 = stage×分区 + 1 分区清单、末 stage 直读 GET == N 且 LIST 0 次、全量读 = LIST 1 + 3N GET、8 线程并发写不丢不覆、缺末 stage 状态算"漏数" |
 | `tests/test_cli_errors.py` | 11 | CLI 契约：spec 写错 → 退出码 2 + 一行提示（无 traceback）、管线跑挂 → 退出码 1、统一入口 `specargo <cmd>` 可用、子命令 `--help` 透传、未知命令拒绝、**YAML 语法错误 → 一行提示 + 退出码 2（三个入口均无 traceback）** |
+| `tests/test_docs_manifests.py` | 4 | 文档/清单一致性：`pipeline_cli <sub>` 必须真实存在、部署文档的 Secret 键名与 artifact-repository 引用一致、清单路径存在、`objstore_env` 字面量语义写明 |
 | `tests/test_docs_numbers.py` | 3 | 文档数字守卫：每个套件的例数与 README / STATUS 表格一致，总例数与 README 4 处 + ROADMAP 1 处 + STATUS 2 处一致——漏改文档即本套件失败 |
 | `tests/test_parallelism.py` | 7 | 扇出并发上限：默认不写、`runtime.parallelism` 落到 `spec.parallelism`、旧名 `k8s:` 同样生效、`--runtime` 覆盖、模板携带、非法值与拼错键名拒绝 |
 | `tests/test_spec_version.py` | 10 | spec 契约版本：缺省不告警、高版本报"升级 specargo"、误写字段名给正确提示、迁移链按序执行且告警默认可见、缺迁移实现明确报错、编译产物带 `specargo.dev/spec-version` 注解 |

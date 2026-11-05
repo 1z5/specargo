@@ -1,7 +1,7 @@
 # specargo
 
 ![unit-tests](https://github.com/1z5/specargo/actions/workflows/unit-tests.yml/badge.svg)
-<!-- unit-tests：172 个离线用例（框架 168 + 领域示例 4），Python 3.11 + 3.12 -->
+<!-- unit-tests：176 个离线用例（框架 172 + 领域示例 4），Python 3.11 + 3.12 -->
 ![k8s smoke](https://github.com/1z5/specargo/actions/workflows/k8s-smoke.yml/badge.svg)
 
 **一个声明式批量数据管线框架：定义一次，本地可跑，也能编译成 Argo CRD 上集群。**
@@ -132,7 +132,7 @@ YAML
 specargo-compile pipelines/etl-demo.yaml --runtime /tmp/compiled/runtime.yaml \
   -o /tmp/compiled/etl-demo-prod.yaml
 
-# 4) 离线测试：172 例（框架 168 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
+# 4) 离线测试：176 例（框架 172 + 领域示例 4），不需要 API key 与集群；CI 在 3.11 / 3.12 上自动跑
 for f in tests/test_*.py examples/tts-asr/tests/test_*.py; do python3 "$f"; done
 
 # 5) 集群冒烟（CI 自动跑；也可手动触发）
@@ -253,7 +253,7 @@ k8s:
 > 一份式的项目状态快照（已验证 / 未验证 / 已知边界 / 下一步）见 [`docs/STATUS.md`](docs/STATUS.md)，
 > 本章是它的展开版。
 
-**已验证（172 个离线用例 = 框架 168 + 领域示例 4，+ 集群 E2E）**：
+**已验证（176 个离线用例 = 框架 172 + 领域示例 4，+ 集群 E2E）**：
 
 - 框架 `tests/test_framework.py`（32 例）：spec 解析与严格校验、四类通用检查、runner 断点跳过 /
   依赖阻断 / 重试 / attempt 计数、对账按 variant 分组抓假绿、`spec2argo` 编译产物结构 /
@@ -299,6 +299,9 @@ k8s:
   0 / 负数 / 字符串 / bool / 小数与拼错键名全部拒绝
 - 模板编译 `tests/test_template.py`（5 例）：`--as-template` / `--reference` 的编译形态与
   引用最小 Workflow（模板与 Workflow 的 spec 完全一致）
+- 文档/清单一致性守卫（`tests/test_docs_manifests.py` 4 例）：文档里的 `pipeline_cli <子命令>` 必须真实存在、
+  部署文档建的 Secret 键名必须与 artifact-repository 引用一致、引用的清单路径必须存在、
+  `objstore_env` 的"值是字面量"语义必须写明——照文档做要真的能跑通
 - 文档数字守卫（`tests/test_docs_numbers.py` 3 例）：每个套件的例数与 README「已验证」/
   STATUS §2.1 表格一致，总例数与 README 4 处 + ROADMAP 1 处 + STATUS 2 处一致——文档漏改
   直接红，不需要靠人记得去改 8 个地方
@@ -529,7 +532,7 @@ k8s/                      CI 基础设施（object-store / artifact-repository /
                           生产示例：rbac.yaml（SA + 最小 Role）、quota.yaml（配额 + 默认 limits）
 docs/                     架构（ARCHITECTURE.md）／部署（DEPLOYMENT.md）／运维（RUNBOOK.md）
                           ／计划（ROADMAP.md）／状态快照（STATUS.md）
-tests/                    离线测试（框架 168 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
+tests/                    离线测试（框架 172 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
 Dockerfile                通用 CI 镜像（pip install specargo + moto S3）
 ```
 

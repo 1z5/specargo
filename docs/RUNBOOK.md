@@ -59,7 +59,7 @@ kubectl -n argo top pod <pod>                 # CPU 是不是 0（卡在 IO/网�
 
 ```bash
 # 定位缺哪几个分区：读分区清单 + 逐条查状态对象
-python3 -m specargo.pipeline_cli reconcile \
+python3 -m specargo.pipeline_cli reconcile-journal \
   --run-id <workflow-name> --final-stage <末 stage> \
   --partitions-file /tmp/partitions.json
 ```

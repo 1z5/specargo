@@ -32,9 +32,11 @@ kubectl -n argo rollout status deploy/workflow-controller
 
 ```bash
 # 1) 凭据
+# 键名必须与 k8s/artifact-repository.yaml 里 accessKeySecret/secretKeySecret 的
+# `key:` 一致（都是小写 accesskey / secretkey），大小写不同会导致读不到凭据
 kubectl -n argo create secret generic argo-artifacts \
-  --from-literal=accessKey="$ACCESS_KEY" \
-  --from-literal=secretKey="$SECRET_KEY"
+  --from-literal=accesskey="$ACCESS_KEY" \
+  --from-literal=secretkey="$SECRET_KEY"
 
 # 2) 仓库定义（注意 annotation：没有它控制器不认默认仓库）
 kubectl apply -f k8s/artifact-repository.yaml
@@ -42,7 +44,8 @@ kubectl apply -f k8s/artifact-repository.yaml
 kubectl -n argo rollout restart deploy/workflow-controller
 ```
 
-`k8s/artifact-repository.yaml` 里的 `endpoint` / `bucket` / `region` 按你的存储改。
+`k8s/artifact-repository.yaml` 里的 `endpoint` / `bucket` / `insecure` 按你的存储改
+（该文件没有 `region` 字段；需要指定区域时在 `default` 的 `s3:` 下自行加 `region: <name>`）。
 **`insecure: true` 只在测试端点（http）时用**，生产走 TLS 必须去掉。
 
 ## 3. 构建并推送镜像
@@ -64,9 +67,9 @@ image: <registry>/specargo:v0.1.0
 namespace: argo
 service_account: argo-workflow          # 见 k8s/rbac.yaml
 objstore_endpoint: https://oss.example.com
-objstore_env:                            # 注入到容器的环境变量名（不是值）
-  OBJSTORE_ACCESS_KEY: ARGO_ACCESS_KEY
-  OBJSTORE_SECRET_KEY: ARGO_SECRET_KEY
+objstore_env:                            # 注意：值是**字面量**，会被直接注入容器 env
+  OBJSTORE_ACCESS_KEY: <your-access-key>   # 不经 Secret 引用——本文件请勿入库，
+  OBJSTORE_SECRET_KEY: <your-secret-key>   # 或用 KMS/Vault 渲染后再交给编译器
 parallelism: 20                          # workflow 级并发上限（防扇出打爆控制器）
 active_deadline_seconds: 7200
 pod_gc_strategy: OnWorkflowSuccess
