@@ -1,0 +1,49 @@
+# Argo Workflow Pod 使用的 ServiceAccount 与最小权限示例。
+#
+# 什么时候需要这个文件：
+#   - 工作流 Pod 需要读 artifact-repository 的 ConfigMap / Secret（跨命名空间时）
+#   - 工作流 Pod 需要写 K8s Event（便于在 `kubectl describe` 里看到业务事件）
+#   - 你的集群启用了 PodSecurity / 禁用了 default SA
+#
+# 什么时候不需要：
+#   - 只在同命名空间跑 container 类型任务、产物走对象存储 → 用 default SA 即可，
+#     Pod 本身不需要任何 K8s API 权限（框架的状态走对象存储，不走 K8s API）。
+#
+# 用法：kubectl apply -f k8s/rbac.yaml，然后在 runtime 配置里写
+#   service_account: argo-workflow
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-workflow
+  namespace: argo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-workflow-pod
+  namespace: argo
+rules:
+  # 只读该命名空间内的配置：artifact 仓库地址与凭据
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list"]
+    # 生产环境建议用 resourceNames 收窄到具体对象，例如：
+    # resourceNames: ["artifact-repositories", "argo-artifacts"]
+  # 写事件：让业务失败在 kubectl describe 里可见
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-workflow-pod
+  namespace: argo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-workflow-pod
+subjects:
+  - kind: ServiceAccount
+    name: argo-workflow
+    namespace: argo

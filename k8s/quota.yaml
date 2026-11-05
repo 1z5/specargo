@@ -1,0 +1,41 @@
+# 命名空间级配额示例：给「批量管线」单独划一块资源，避免扇出把集群打满。
+#
+# 为什么需要它：本框架的扇出是 N 分区 × M 个 stage/gate。即使编译时写了
+# `parallelism`（workflow 级并发上限），同时提交多个 workflow 时仍会叠加；
+# ResourceQuota 是最后一道闸，LimitRange 负责给没写 requests/limits 的模板兜底。
+#
+# 数值只是示例，按你的节点规格和 SLO 调整。用法：
+#   kubectl apply -f k8s/quota.yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: batch-pipeline-quota
+  namespace: argo
+spec:
+  hard:
+    # 并发 Pod 总量（含已完成但未 GC 的 Pod，用 podGC 及时回收）
+    pods: "300"
+    requests.cpu: "120"
+    requests.memory: "240Gi"
+    limits.cpu: "240"
+    limits.memory: "480Gi"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: batch-pipeline-defaults
+  namespace: argo
+spec:
+  limits:
+    - type: Container
+      # 模板没写 resources 时的兜底值：小到不会浪费，大到能跑常规清洗/推理
+      defaultRequests:
+        cpu: "500m"
+        memory: "1Gi"
+      default:
+        cpu: "2"
+        memory: "4Gi"
+      # 单个容器上限：防止一次把节点吃满
+      max:
+        cpu: "16"
+        memory: "64Gi"

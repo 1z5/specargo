@@ -159,6 +159,25 @@ WorkflowTemplate 版本化：`--as-template` 产出模板 → `--reference` 引�
 - `onExit` 对账默认关闭，需 `k8s.journal: true` 显式开启。
 - 跳过发生在 task 内部（Argo 仍会拉 Pod）；要省 Pod 需 WorkflowTemplate + `when`。
 
+## 3.5 交付就绪度（"能交出去"与"能上生产"是两件事）
+
+| 维度 | 现状 | 结论 |
+|---|---|---|
+| **功能闭环** | spec 解析 → 本地执行 / 编译上集群 → 质量闸门 → 状态登记 → 对账 → 常驻服务 | ✅ 可交付 |
+| **安装可复现** | 全新克隆 + `pip install -e .` + 快速开始五步，已在干净 venv 逐步验证 | ✅ 可交付 |
+| **部署文档** | [`DEPLOYMENT.md`](DEPLOYMENT.md)：Argo 安装、artifact 仓库、镜像、RBAC、配额、升级回滚、验收清单 | ✅ 可交付 |
+| **运维手册** | [`RUNBOOK.md`](RUNBOOK.md)：Pending / Failed / 卡住 / 漏数 / resume 不生效 / 对象存储故障 / 状态损坏 | ✅ 可交付 |
+| **权限与配额** | `k8s/rbac.yaml`（SA + 最小 Role）、`k8s/quota.yaml`（ResourceQuota + LimitRange），kubectl client 校验通过 | ✅ 可交付（示例值需按环境调） |
+| **版本与变更** | `CHANGELOG.md` + git tag `v0.1.0` | ✅ 可交付 |
+| **生产环境验证** | 真实对象存储吞吐、千级 Pod、多副本 HA、RWX PVC | ❌ 未验证（见 §4） |
+| **安全加固** | 镜像非 root、Secret 外置（Vault/KMS）、网络策略、多租户审计 | ❌ 未做 |
+| **发布与灰度** | 无 Helm chart、无金丝雀/流量切换（批处理侧影响小，模型版本灰度未做） | ❌ 未做 |
+
+**一句话**：这套东西可以**交给另一个工程师在他自己的集群上跑起来并运维**（有部署手册、
+运维手册、权限配额示例、版本与变更记录、172 例离线测试 + 真集群 CI）；
+但**不等于已经在生产上跑过**——§4 的环境相关验证和上面的安全加固是它成为
+"生产系统"之前必须补的，且只能在真实环境补。
+
 ## 4. 未验证（需要真实环境，代码无法自证）
 
 - **生产级对象存储**：当前集群冒烟用进程内 moto 自建 S3 端点，MinIO / OSS / S3 的真实吞吐、

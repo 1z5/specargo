@@ -117,6 +117,8 @@ specargo-run pipelines/etl-demo.yaml --state-db /tmp/etl-run/state.db --workdir 
 specargo-run pipelines/etl-demo.yaml --state-db /tmp/etl-run/state.db --workdir /tmp/etl-run
 
 # 3) 编译成 Argo CRD（lint 需要自行安装 argo CLI，可选）
+#    注意 CLI 版本：本项目在 Argo v3.7.x 上验证。v4 改了 CronWorkflow 的 schema，
+#    用 v4 CLI lint `CronWorkflow` 会报 unknown field "spec.schedule"——那是版本差异，不是产物错误。
 mkdir -p /tmp/compiled
 specargo-compile pipelines/etl-demo.yaml -o /tmp/compiled/etl-demo.yaml
 argo lint --offline /tmp/compiled/etl-demo.yaml
@@ -246,6 +248,8 @@ k8s:
 
 ## 已验证 / 未验证
 
+> 要在自己的集群上装起来：见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)（含 artifact 仓库、
+> RBAC、配额、升级回滚与验收清单）；出问题怎么查：见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。
 > 一份式的项目状态快照（已验证 / 未验证 / 已知边界 / 下一步）见 [`docs/STATUS.md`](docs/STATUS.md)，
 > 本章是它的展开版。
 
@@ -522,7 +526,9 @@ examples/tts-asr/         领域插件示例（TTS 生成 + ASR 回检 + 对账�
   data/                   示例书籍数据（无真实业务内容）
 pipelines/                通用管线定义（dataset-build.yaml / etl-demo.yaml）
 k8s/                      CI 基础设施（object-store / artifact-repository / 历史 smoke）
-docs/                     架构（ARCHITECTURE.md）与计划（ROADMAP.md）
+                          生产示例：rbac.yaml（SA + 最小 Role）、quota.yaml（配额 + 默认 limits）
+docs/                     架构（ARCHITECTURE.md）／部署（DEPLOYMENT.md）／运维（RUNBOOK.md）
+                          ／计划（ROADMAP.md）／状态快照（STATUS.md）
 tests/                    离线测试（框架 168 例）；领域示例测试在 examples/tts-asr/tests/（4 例）
 Dockerfile                通用 CI 镜像（pip install specargo + moto S3）
 ```

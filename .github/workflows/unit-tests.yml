@@ -158,10 +158,23 @@ jobs:
           gunzip -f /tmp/argo.gz
           chmod +x /tmp/argo
           for f in k8s/*.yaml examples/tts-asr/k8s/*.yaml /tmp/compiled/*.yaml; do
-            # object-store / artifact-repository 是原生 K8s 资源，argo lint 不认识，跳过
-            case "$f" in
-              *object-store.yaml|*artifact-repository.yaml) continue ;;
-            esac
-            echo "--- $f ---"
-            /tmp/argo lint --offline "$f"
+            # Argo 的 CRD 用 argo lint；原生 K8s 资源（Secret/Deployment/ConfigMap/
+            # Service/ServiceAccount/Role/RoleBinding/ResourceQuota/LimitRange）
+            # argo lint 不认识，改做结构校验，避免"新增一个原生清单就要改这段 case"。
+            if grep -qE '^kind:[[:space:]]*(Workflow|WorkflowTemplate|CronWorkflow|ClusterWorkflowTemplate)' "$f"; then
+              echo "--- [argo lint] $f ---"
+              /tmp/argo lint --offline "$f"
+            else
+              echo "--- [k8s 结构校验] $f ---"
+              python3 - "$f" <<'PY'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if d]
+          assert docs, f"{sys.argv[1]}: 没有解析出任何文档"
+          for d in docs:
+              for key in ("apiVersion", "kind", "metadata"):
+                  assert key in d, f"{sys.argv[1]}: 缺少 {key}"
+              assert d["metadata"].get("name"), f"{sys.argv[1]}: metadata.name 为空"
+          print(f"  ✅ {len(docs)} 个原生资源结构合法")
+          PY
+            fi
           done
